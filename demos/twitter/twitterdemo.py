@@ -62,6 +62,7 @@ class LoginHandler(BaseHandler, TwitterMixin):
     def get(self):
         if self.get_argument('oauth_token', None):
             user = yield self.get_authenticated_user()
+            del user["description"]
             self.set_secure_cookie(self.COOKIE_NAME, json_encode(user))
             self.redirect(self.get_argument('next', '/'))
         else:
@@ -86,7 +87,7 @@ def main():
     app.listen(options.port)
 
     logging.info('Listening on http://localhost:%d' % options.port)
-    IOLoop.instance().start()
+    IOLoop.current().start()
 
 if __name__ == '__main__':
     main()

@@ -14,6 +14,7 @@
 # License for the specific language governing permissions and limitations
 # under the License.
 
+import os
 import platform
 import sys
 import warnings
@@ -33,15 +34,7 @@ from distutils.core import Extension
 # to support installing without the extension on platforms where
 # no compiler is available.
 from distutils.command.build_ext import build_ext
-from distutils.errors import CCompilerError
-from distutils.errors import DistutilsPlatformError, DistutilsExecError
-if sys.platform == 'win32' and sys.version_info > (2, 6):
-    # 2.6's distutils.msvc9compiler can raise an IOError when failing to
-    # find the compiler
-    build_errors = (CCompilerError, DistutilsExecError,
-                    DistutilsPlatformError, IOError)
-else:
-    build_errors = (CCompilerError, DistutilsExecError, DistutilsPlatformError)
+
 
 class custom_build_ext(build_ext):
     """Allow C extension building to fail.
@@ -81,7 +74,7 @@ http://api.mongodb.org/python/current/installation.html#osx
     def run(self):
         try:
             build_ext.run(self)
-        except DistutilsPlatformError:
+        except Exception:
             e = sys.exc_info()[1]
             sys.stdout.write('%s\n' % str(e))
             warnings.warn(self.warning_message % ("Extension modules",
@@ -91,34 +84,28 @@ http://api.mongodb.org/python/current/installation.html#osx
 
     def build_extension(self, ext):
         name = ext.name
-        if sys.version_info[:3] >= (2, 4, 0):
-            try:
-                build_ext.build_extension(self, ext)
-            except build_errors:
-                e = sys.exc_info()[1]
-                sys.stdout.write('%s\n' % str(e))
-                warnings.warn(self.warning_message % ("The %s extension "
-                                                      "module" % (name,),
-                                                      "The output above "
-                                                      "this warning shows how "
-                                                      "the compilation "
-                                                      "failed."))
-        else:
+        try:
+            build_ext.build_extension(self, ext)
+        except Exception:
+            e = sys.exc_info()[1]
+            sys.stdout.write('%s\n' % str(e))
             warnings.warn(self.warning_message % ("The %s extension "
                                                   "module" % (name,),
-                                                  "Please use Python >= 2.4 "
-                                                  "to take advantage of the "
-                                                  "extension."))
+                                                  "The output above "
+                                                  "this warning shows how "
+                                                  "the compilation "
+                                                  "failed."))
 
 
 kwargs = {}
 
-version = "3.2.dev2"
+version = "4.2.dev1"
 
 with open('README.rst') as f:
     kwargs['long_description'] = f.read()
 
-if platform.python_implementation() == 'CPython':
+if (platform.python_implementation() == 'CPython' and
+        os.environ.get('TORNADO_EXTENSION') != '0'):
     # This extension builds and works on pypy as well, although pypy's jit
     # produces equivalent performance.
     kwargs['ext_modules'] = [
@@ -126,17 +113,29 @@ if platform.python_implementation() == 'CPython':
                   sources=['tornado/speedups.c']),
     ]
 
+    if os.environ.get('TORNADO_EXTENSION') != '1':
+        # Unless the user has specified that the extension is mandatory,
+        # fall back to the pure-python implementation on any build failure.
+        kwargs['cmdclass'] = {'build_ext': custom_build_ext}
+
+
 if setuptools is not None:
     # If setuptools is not available, you're on your own for dependencies.
+    install_requires = []
     if sys.version_info < (3, 2):
-        kwargs['install_requires'] = ['backports.ssl_match_hostname']
+        install_requires.append('backports.ssl_match_hostname')
+    if sys.version_info < (3, 4):
+        # Certifi is also optional on 2.7.9+, although making our dependencies
+        # conditional on micro version numbers seems like a bad idea
+        # until we have more declarative metadata.
+        install_requires.append('certifi')
+    kwargs['install_requires'] = install_requires
 
 setup(
     name="tornado",
     version=version,
-    packages = ["tornado", "tornado.test", "tornado.platform"],
-    package_data = {
-        "tornado": ["ca-certificates.crt"],
+    packages=["tornado", "tornado.test", "tornado.platform"],
+    package_data={
         # data files need to be listed both here (which determines what gets
         # installed) and in MANIFEST.in (which determines what gets included
         # in the sdist tarball)
@@ -166,9 +165,9 @@ setup(
         'Programming Language :: Python :: 3',
         'Programming Language :: Python :: 3.2',
         'Programming Language :: Python :: 3.3',
+        'Programming Language :: Python :: 3.4',
         'Programming Language :: Python :: Implementation :: CPython',
         'Programming Language :: Python :: Implementation :: PyPy',
         ],
-    cmdclass={"build_ext": custom_build_ext},
     **kwargs
 )

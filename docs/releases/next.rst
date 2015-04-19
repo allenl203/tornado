@@ -4,86 +4,128 @@ What's new in the next version of Tornado
 In Progress
 -----------
 
-* `.WSGIContainer` now calls the iterable's ``close()`` method even if
-  an error is raised, in compliance with the spec.
-* Fixed an incorrect error message when handler methods return a value
-  other than None or a Future.
-* `.xhtml_escape` now escapes apostrophes as well.
-* `.Subprocess` no longer leaks file descriptors if `subprocess.Popen` fails.
-* `.IOLoop` now frees callback objects earlier, reducing memory usage
-  while idle.
-* `.FacebookGraphMixin` has been updated to use the current Facebook login
-  URL, which saves a redirect.
-* `.IOStream` now recognizes ``ECONNABORTED`` error codes in more places
-  (which was mainly an issue on Windows).
-* `.IOStream` now frees memory earlier if a connection is closed while
-  there is data in the write buffer.
-* `.StaticFileHandler` no longer fails if the client requests a ``Range`` that
-  is larger than the entire file (Facebook has a crawler that does this).
-* `.PipeIOStream` now handles ``EAGAIN`` error codes correctly.
-* `.SSLIOStream` now initiates the SSL handshake automatically without
-  waiting for the application to try and read or write to the connection.
-* `.IOLoop` now uses `~.IOLoop.handle_callback_exception` consistently for
-  error logging.
-* `.RequestHandler.on_connection_close` now works correctly on subsequent
-  requests of a keep-alive connection.
-* `.RequestHandler.clear_all_cookies` now accepts ``domain`` and ``path``
-  arguments, just like `~.RequestHandler.clear_cookie`.
-* The embedded ``ca-certificats.crt`` file has been updated with the current
-  Mozilla CA list.
-* `.GoogleOAuth2Mixin` has been added so that Google's OAuth2 only apps are
-  able to get a context without OpenID (which uses OAuth 1).
-* `.WebSocketHandler.write_message` now raises `.WebSocketClosedError` instead
-  of `AttributeError` when the connection has been closed.
-* ``simple_httpclient`` now applies the ``connect_timeout`` to requests
-  that are queued and have not yet started.
-* `.is_valid_ip` (and therefore ``HTTPRequest.remote_ip``) now rejects
-  empty strings.
-* `.websocket_connect` now accepts preconstructed ``HTTPRequest`` objects.
-* Fix a bug with `.WebSocketHandler` when used with some proxies that
-  unconditionally modify the ``Connection`` header.
-* New application setting ``default_handler_class`` can be used to easily
-  set up custom 404 pages.
-* Fix some error messages for unix sockets (and other non-IP sockets)
-* New application settings ``autoreload``, ``compiled_template_cache``,
-  ``static_hash_cache``, and ``serve_traceback`` can be used to control
-  individual aspects of debug mode.
-* New methods `.RequestHandler.get_query_argument` and
-  `.RequestHandler.get_body_argument` and new attributes
-  `.HTTPRequest.query_arguments` and `.HTTPRequest.body_arguments` allow access
-  to arguments without intermingling those from the query string with those
-  from the request body.
-* `.websocket_connect` now returns an error immediately for refused connections
-  instead of waiting for the timeout.
-* Exceptions will no longer be logged twice when using both ``@asynchronous``
-  and ``@gen.coroutine``
-* Swallow a spurious exception from ``set_nodelay`` when a connection
-  has been reset.
-* Coroutines may now yield dicts in addition to lists to wait for
-  multiple tasks in parallel.
-* Fix an error from `tornado.log.enable_pretty_logging` when
-  `sys.stderr` does not have an ``isatty`` method.
-* `.WebSocketClientConnection` now has a ``close`` method.
-* It is now possible to specify handlers by name when using the `.URLSpec`
-  class.
-* On Python 2.6, ``simple_httpclient`` now uses TLSv1 instead of SSLv3.
-* Added `.GoogleOAuth2Mixin` support authentication to Google services
-  with OAuth 2 instead of OpenID and OAuth 1.
-* `.Application` now accepts 4-tuples to specify the ``name`` parameter
-  (which previously required constructing a `.URLSpec` object instead of
-  a tuple).
-* ``simple_httpclient`` now enforces the connect timeout during DNS resolution.
-* Tornado now depends on the `backports.ssl_match_hostname
-  <https://pypi.python.org/pypi/backports.ssl_match_hostname>`_ when
-  running on Python 2.  This will be installed automatically when using ``pip``
-  or ``easy_install``
-* Tornado now includes an optional C extension module, which greatly improves
-  performance of websockets.  This extension will be built automatically
-  if a C compiler is found at install time.
-* The `tornado.platform.asyncio` module provides integration with the
-  ``asyncio`` module introduced in Python 3.4.
-* Malformed ``x-www-form-urlencoded`` request bodies will now log a warning
-  and continue instead of causing the request to fail (similar to the existing
-  handling of malformed ``multipart/form-data`` bodies.  This is done mainly
-  because some libraries send this content type by default even when the data
-  is not form-encoded.
+Backwards-compatibility notes
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+* ``SSLIOStream.connect`` and `.IOStream.start_tls` now validate certificates
+  by default.
+* Certificate validation will now use the system CA root certificates instead
+  of ``certifi`` when possible (i.e. Python 2.7.9+ or 3.4+). This includes
+  `.IOStream` and ``simple_httpclient``, but not ``curl_httpclient``.
+* The default SSL configuration has become stricter, using
+  `ssl.create_default_context` where available.
+* The deprecated classes in the `tornado.auth` module, ``GoogleMixin``,
+  ``FacebookMixin``, and ``FriendFeedMixin`` have been removed.
+
+`tornado.autoreload`
+~~~~~~~~~~~~~~~~~~~~
+
+* Improved compatibility with Windows.
+
+`tornado.gen`
+~~~~~~~~~~~~~
+
+* On Python 3, catching an exception in a coroutine no longer leads to
+  leaks via ``Exception.__context__``.
+
+`tornado.httpclient`
+~~~~~~~~~~~~~~~~~~~~
+
+* The ``raise_error`` argument now works correctly with the synchronous
+  `.HTTPClient`.
+
+`tornado.httpserver`
+~~~~~~~~~~~~~~~~~~~~
+
+* `.HTTPServer` is now a subclass of `tornado.util.Configurable`.
+
+`tornado.ioloop`
+~~~~~~~~~~~~~~~~
+
+* `.PeriodicCallback` is now more efficient when the clock jumps forward
+  by a large amount.
+
+`tornado.iostream`
+~~~~~~~~~~~~~~~~~~
+
+* ``SSLIOStream.connect`` and `.IOStream.start_tls` now validate certificates
+  by default.
+* New method `.SSLIOStream.wait_for_handshake` allows server-side applications
+  to wait for the handshake to complete in order to verify client certificates
+  or use NPN/ALPN.
+* The `.Future` returned by ``SSLIOStream.connect`` now resolves after the
+  handshake is complete instead of as soon as the TCP connection is
+  established.
+* Reduced logging of SSL errors.
+* `.BaseIOStream.read_until_close` now works correctly when a
+  ``streaming_callback`` is given but ``callback`` is None (i.e. when
+  it returns a `.Future`)
+
+`tornado.locale`
+~~~~~~~~~~~~~~~~
+
+* New method `.GettextLocale.pgettext` allows additional context to be
+  supplied for gettext translations.
+
+`tornado.locks`
+~~~~~~~~~~~~~~~
+
+* New module contains locking and synchronization functionality imported
+  from `Toro <http://toro.readthedocs.org>`_.
+
+`tornado.log`
+~~~~~~~~~~~~~
+
+* `.define_logging_options` now works correctly when given a non-default
+  ``options`` object.
+
+`tornado.process`
+~~~~~~~~~~~~~~~~~
+
+* New method `.Subprocess.wait_for_exit` is a coroutine-friendly
+  version of `.Subprocess.set_exit_callback`.
+
+``tornado.simple_httpclient``
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+* Improved performance on Python 3 by reusing a single `ssl.SSLContext`.
+
+`tornado.queues`
+~~~~~~~~~~~~~~~~
+
+* New module contains queues imported from `Toro
+  <http://toro.readthedocs.org>`_.
+
+`tornado.tcpserver`
+~~~~~~~~~~~~~~~~~~~
+
+* `.TCPServer.handle_stream` may be a coroutine (so that any exceptions
+  it raises will be logged).
+
+`tornado.util`
+~~~~~~~~~~~~~~
+
+* `.import_object` now supports unicode strings on Python 2.
+* `.Configurable.initialize` now supports positional arguments.
+
+`tornado.web`
+~~~~~~~~~~~~~
+
+* Passing ``secure=False`` or ``httponly=False`` to
+  `.RequestHandler.set_cookie` now works as expected (previously only the
+  presence of the argument was considered and its value was ignored).
+* Parsing of the ``If-None-Match`` header now follows the RFC and supports
+  weak validators.
+* `.RequestHandler.get_arguments` now requires that its ``strip`` argument
+  be of type bool. This helps prevent errors caused by the slightly dissimilar
+  interfaces between the singular and plural methods.
+* Errors raised in ``_handle_request_exception`` are now logged more reliably.
+* `.RequestHandler.redirect` now works correctly when called from a handler
+  whose path begins with two slashes.
+* Passing messages containing ``%`` characters to `tornado.web.HTTPError`
+  no longer causes broken error messages.
+
+`tornado.websocket`
+~~~~~~~~~~~~~~~~~~~
+
+* The ``on_close`` method will no longer be called more than once.
