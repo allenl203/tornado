@@ -1,8 +1,8 @@
 #!/usr/bin/env python
 from __future__ import absolute_import, division, print_function, with_statement
 
-from tornado.concurrent import is_future
 from tornado.escape import utf8, _unicode
+from tornado import gen
 from tornado.httpclient import HTTPResponse, HTTPError, AsyncHTTPClient, main, _RequestProxy
 from tornado import httputil
 from tornado.http1connection import HTTP1Connection, HTTP1ConnectionParameters
@@ -50,9 +50,6 @@ class SimpleAsyncHTTPClient(AsyncHTTPClient):
     """Non-blocking HTTP client with no external dependencies.
 
     This class implements an HTTP 1.1 client on top of Tornado's IOStreams.
-    It does not currently implement all applicable parts of the HTTP
-    specification, but it does enough to work with major web service APIs.
-
     Some features found in the curl-based AsyncHTTPClient are not yet
     supported.  In particular, proxies are not supported, connections
     are not reused, and callers cannot select the network interface to be
@@ -66,20 +63,33 @@ class SimpleAsyncHTTPClient(AsyncHTTPClient):
 
         Only a single AsyncHTTPClient instance exists per IOLoop
         in order to provide limitations on the number of pending connections.
-        force_instance=True may be used to suppress this behavior.
+        ``force_instance=True`` may be used to suppress this behavior.
 
-        max_clients is the number of concurrent requests that can be
-        in progress.  Note that this arguments are only used when the
-        client is first created, and will be ignored when an existing
-        client is reused.
+        Note that because of this implicit reuse, unless ``force_instance``
+        is used, only the first call to the constructor actually uses
+        its arguments. It is recommended to use the ``configure`` method
+        instead of the constructor to ensure that arguments take effect.
 
-        hostname_mapping is a dictionary mapping hostnames to IP addresses.
+        ``max_clients`` is the number of concurrent requests that can be
+        in progress; when this limit is reached additional requests will be
+        queued. Note that time spent waiting in this queue still counts
+        against the ``request_timeout``.
+
+        ``hostname_mapping`` is a dictionary mapping hostnames to IP addresses.
         It can be used to make local DNS changes when modifying system-wide
-        settings like /etc/hosts is not possible or desirable (e.g. in
+        settings like ``/etc/hosts`` is not possible or desirable (e.g. in
         unittests).
 
-        max_buffer_size is the number of bytes that can be read by IOStream. It
-        defaults to 100mb.
+        ``max_buffer_size`` (default 100MB) is the number of bytes
+        that can be read into memory at once. ``max_body_size``
+        (defaults to ``max_buffer_size``) is the largest response body
+        that the client will accept.  Without a
+        ``streaming_callback``, the smaller of these two limits
+        applies; with a ``streaming_callback`` only ``max_body_size``
+        does.
+
+        .. versionchanged:: 4.2
+           Added the ``max_body_size`` argument.
         """
         super(SimpleAsyncHTTPClient, self).initialize(io_loop,
                                                       defaults=defaults)
@@ -116,7 +126,7 @@ class SimpleAsyncHTTPClient(AsyncHTTPClient):
             timeout_handle = self.io_loop.add_timeout(
                 self.io_loop.time() + min(request.connect_timeout,
                                           request.request_timeout),
-                functools.partial(self._on_timeout, key))
+                functools.partial(self._on_timeout, key, "in request queue"))
         else:
             timeout_handle = None
         self.waiting[key] = (request, callback, timeout_handle)
@@ -157,11 +167,20 @@ class SimpleAsyncHTTPClient(AsyncHTTPClient):
                 self.io_loop.remove_timeout(timeout_handle)
             del self.waiting[key]
 
-    def _on_timeout(self, key):
+    def _on_timeout(self, key, info=None):
+        """Timeout callback of request.
+
+        Construct a timeout HTTPResponse when a timeout occurs.
+
+        :arg object key: A simple object to mark the request.
+        :info string key: More detailed timeout information.
+        """
         request, callback, timeout_handle = self.waiting[key]
         self.queue.remove((key, request, callback))
+
+        error_message = "Timeout {0}".format(info) if info else "Timeout"
         timeout_response = HTTPResponse(
-            request, 599, error=HTTPError(599, "Timeout"),
+            request, 599, error=HTTPError(599, error_message),
             request_time=self.io_loop.time() - request.start_time)
         self.io_loop.add_callback(callback, timeout_response)
         del self.waiting[key]
@@ -219,7 +238,7 @@ class _HTTPConnection(httputil.HTTPMessageDelegate):
             if timeout:
                 self._timeout = self.io_loop.add_timeout(
                     self.start_time + timeout,
-                    stack_context.wrap(self._on_timeout))
+                    stack_context.wrap(functools.partial(self._on_timeout, "while connecting")))
             self.tcp_client.connect(host, port, af=af,
                                     ssl_options=ssl_options,
                                     max_buffer_size=self.max_buffer_size,
@@ -274,10 +293,17 @@ class _HTTPConnection(httputil.HTTPMessageDelegate):
             return ssl_options
         return None
 
-    def _on_timeout(self):
+    def _on_timeout(self, info=None):
+        """Timeout callback of _HTTPConnection instance.
+
+        Raise a timeout HTTPError when a timeout occurs.
+
+        :info string key: More detailed timeout information.
+        """
         self._timeout = None
+        error_message = "Timeout {0}".format(info) if info else "Timeout"
         if self.final_callback is not None:
-            raise HTTPError(599, "Timeout")
+            raise HTTPError(599, error_message)
 
     def _remove_timeout(self):
         if self._timeout is not None:
@@ -297,7 +323,7 @@ class _HTTPConnection(httputil.HTTPMessageDelegate):
         if self.request.request_timeout:
             self._timeout = self.io_loop.add_timeout(
                 self.start_time + self.request.request_timeout,
-                stack_context.wrap(self._on_timeout))
+                stack_context.wrap(functools.partial(self._on_timeout, "during request")))
         if (self.request.method not in self._SUPPORTED_METHODS and
                 not self.request.allow_nonstandard_methods):
             raise KeyError("unknown method %s" % self.request.method)
@@ -381,7 +407,9 @@ class _HTTPConnection(httputil.HTTPMessageDelegate):
             self.connection.write(self.request.body)
         elif self.request.body_producer is not None:
             fut = self.request.body_producer(self.connection.write)
-            if is_future(fut):
+            if fut is not None:
+                fut = gen.convert_yielded(fut)
+
                 def on_body_written(fut):
                     fut.result()
                     self.connection.finish()
@@ -417,7 +445,10 @@ class _HTTPConnection(httputil.HTTPMessageDelegate):
         if self.final_callback:
             self._remove_timeout()
             if isinstance(value, StreamClosedError):
-                value = HTTPError(599, "Stream closed")
+                if value.real_error is None:
+                    value = HTTPError(599, "Stream closed")
+                else:
+                    value = value.real_error
             self._run_callback(HTTPResponse(self.request, 599, error=value,
                                             request_time=self.io_loop.time() - self.start_time,
                                             ))
@@ -449,9 +480,12 @@ class _HTTPConnection(httputil.HTTPMessageDelegate):
         if self.request.expect_100_continue and first_line.code == 100:
             self._write_body(False)
             return
-        self.headers = headers
         self.code = first_line.code
         self.reason = first_line.reason
+        self.headers = headers
+
+        if self._should_follow_redirect():
+            return
 
         if self.request.header_callback is not None:
             # Reassemble the start line.
@@ -460,14 +494,17 @@ class _HTTPConnection(httputil.HTTPMessageDelegate):
                 self.request.header_callback("%s: %s\r\n" % (k, v))
             self.request.header_callback('\r\n')
 
+    def _should_follow_redirect(self):
+        return (self.request.follow_redirects and
+                self.request.max_redirects > 0 and
+                self.code in (301, 302, 303, 307))
+
     def finish(self):
         data = b''.join(self.chunks)
         self._remove_timeout()
         original_request = getattr(self.request, "original_request",
                                    self.request)
-        if (self.request.follow_redirects and
-            self.request.max_redirects > 0 and
-                self.code in (301, 302, 303, 307)):
+        if self._should_follow_redirect():
             assert isinstance(self.request, _RequestProxy)
             new_request = copy.copy(self.request.request)
             new_request.url = urlparse.urljoin(self.request.url,
@@ -514,6 +551,9 @@ class _HTTPConnection(httputil.HTTPMessageDelegate):
         self.stream.close()
 
     def data_received(self, chunk):
+        if self._should_follow_redirect():
+            # We're going to follow a redirect so just discard the body.
+            return
         if self.request.streaming_callback is not None:
             self.request.streaming_callback(chunk)
         else:
