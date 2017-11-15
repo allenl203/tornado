@@ -74,7 +74,7 @@ See the `convert_yielded` function to extend this mechanism.
    via ``singledispatch``.
 
 """
-from __future__ import absolute_import, division, print_function, with_statement
+from __future__ import absolute_import, division, print_function
 
 import collections
 import functools
@@ -83,16 +83,18 @@ import os
 import sys
 import textwrap
 import types
+import weakref
 
-from tornado.concurrent import Future, TracebackFuture, is_future, chain_future
+from tornado.concurrent import Future, is_future, chain_future, future_set_exc_info, future_add_done_callback
 from tornado.ioloop import IOLoop
 from tornado.log import app_log
 from tornado import stack_context
-from tornado.util import PY3, raise_exc_info
+from tornado.util import PY3, raise_exc_info, TimeoutError
 
 try:
     try:
-        from functools import singledispatch  # py34+
+        # py34+
+        from functools import singledispatch  # type: ignore
     except ImportError:
         from singledispatch import singledispatch  # backport
 except ImportError:
@@ -108,12 +110,14 @@ except ImportError:
 
 try:
     try:
-        from collections.abc import Generator as GeneratorType  # py35+
+        # py35+
+        from collections.abc import Generator as GeneratorType  # type: ignore
     except ImportError:
-        from backports_abc import Generator as GeneratorType
+        from backports_abc import Generator as GeneratorType  # type: ignore
 
     try:
-        from inspect import isawaitable  # py35+
+        # py35+
+        from inspect import isawaitable  # type: ignore
     except ImportError:
         from backports_abc import isawaitable
 except ImportError:
@@ -121,7 +125,7 @@ except ImportError:
         raise
     from types import GeneratorType
 
-    def isawaitable(x):
+    def isawaitable(x):  # type: ignore
         return False
 
 if PY3:
@@ -148,10 +152,6 @@ class BadYieldError(Exception):
 
 class ReturnValueIgnoredError(Exception):
     pass
-
-
-class TimeoutError(Exception):
-    """Exception raised by ``with_timeout``."""
 
 
 def _value_from_stopiteration(e):
@@ -200,7 +200,7 @@ def engine(func):
         # The engine interface doesn't give us any way to return
         # errors but to raise them into the stack context.
         # Save the stack context here to use when the Future has resolved.
-        future.add_done_callback(stack_context.wrap(final_callback))
+        future_add_done_callback(future, stack_context.wrap(final_callback))
     return wrapper
 
 
@@ -242,6 +242,26 @@ def coroutine(func, replace_callback=True):
     return _make_coroutine_wrapper(func, replace_callback=True)
 
 
+# Ties lifetime of runners to their result futures. Github Issue #1769
+# Generators, like any object in Python, must be strong referenced
+# in order to not be cleaned up by the garbage collector. When using
+# coroutines, the Runner object is what strong-refs the inner
+# generator. However, the only item that strong-reffed the Runner
+# was the last Future that the inner generator yielded (via the
+# Future's internal done_callback list). Usually this is enough, but
+# it is also possible for this Future to not have any strong references
+# other than other objects referenced by the Runner object (usually
+# when using other callback patterns and/or weakrefs). In this
+# situation, if a garbage collection ran, a cycle would be detected and
+# Runner objects could be destroyed along with their inner generators
+# and everything in their local scope.
+# This map provides strong references to Runner objects as long as
+# their result future objects also have strong references (typically
+# from the parent coroutine's Runner). This keeps the coroutine's
+# Runner alive.
+_futures_to_runners = weakref.WeakKeyDictionary()
+
+
 def _make_coroutine_wrapper(func, replace_callback):
     """The inner workings of ``@gen.coroutine`` and ``@gen.engine``.
 
@@ -251,12 +271,13 @@ def _make_coroutine_wrapper(func, replace_callback):
     """
     # On Python 3.5, set the coroutine flag on our generator, to allow it
     # to be used with 'await'.
+    wrapped = func
     if hasattr(types, 'coroutine'):
         func = types.coroutine(func)
 
-    @functools.wraps(func)
+    @functools.wraps(wrapped)
     def wrapper(*args, **kwargs):
-        future = TracebackFuture()
+        future = Future()
 
         if replace_callback and 'callback' in kwargs:
             callback = kwargs.pop('callback')
@@ -268,7 +289,7 @@ def _make_coroutine_wrapper(func, replace_callback):
         except (Return, StopIteration) as e:
             result = _value_from_stopiteration(e)
         except Exception:
-            future.set_exc_info(sys.exc_info())
+            future_set_exc_info(future, sys.exc_info())
             return future
         else:
             if isinstance(result, GeneratorType):
@@ -281,7 +302,7 @@ def _make_coroutine_wrapper(func, replace_callback):
                     orig_stack_contexts = stack_context._state.contexts
                     yielded = next(result)
                     if stack_context._state.contexts is not orig_stack_contexts:
-                        yielded = TracebackFuture()
+                        yielded = Future()
                         yielded.set_exception(
                             stack_context.StackContextInconsistentError(
                                 'stack_context inconsistency (probably caused '
@@ -289,9 +310,10 @@ def _make_coroutine_wrapper(func, replace_callback):
                 except (StopIteration, Return) as e:
                     future.set_result(_value_from_stopiteration(e))
                 except Exception:
-                    future.set_exc_info(sys.exc_info())
+                    future_set_exc_info(future, sys.exc_info())
                 else:
-                    Runner(result, future, yielded)
+                    _futures_to_runners[future] = Runner(result, future, yielded)
+                yielded = None
                 try:
                     return future
                 finally:
@@ -306,7 +328,19 @@ def _make_coroutine_wrapper(func, replace_callback):
                     future = None
         future.set_result(result)
         return future
+
+    wrapper.__wrapped__ = wrapped
+    wrapper.__tornado_coroutine__ = True
     return wrapper
+
+
+def is_coroutine_function(func):
+    """Return whether *func* is a coroutine function, i.e. a function
+    wrapped with `~.gen.coroutine`.
+
+    .. versionadded:: 4.5
+    """
+    return getattr(func, '__tornado_coroutine__', False)
 
 
 class Return(Exception):
@@ -406,7 +440,7 @@ class WaitIterator(object):
         self._running_future = None
 
         for future in futures:
-            future.add_done_callback(self._done_callback)
+            future_add_done_callback(future, self._done_callback)
 
     def done(self):
         """Returns True if this iterator has no more results."""
@@ -422,7 +456,7 @@ class WaitIterator(object):
         Note that this `.Future` will not be the same object as any of
         the inputs.
         """
-        self._running_future = TracebackFuture()
+        self._running_future = Future()
 
         if self._finished:
             self._return_result(self._finished.popleft())
@@ -444,9 +478,8 @@ class WaitIterator(object):
         self.current_future = done
         self.current_index = self._unfinished.pop(done)
 
-    @coroutine
     def __aiter__(self):
-        raise Return(self)
+        return self
 
     def __anext__(self):
         if self.done():
@@ -573,7 +606,7 @@ def Task(func, *args, **kwargs):
     def handle_exception(typ, value, tb):
         if future.done():
             return False
-        future.set_exc_info((typ, value, tb))
+        future_set_exc_info(future, (typ, value, tb))
         return True
 
     def set_result(result):
@@ -586,14 +619,14 @@ def Task(func, *args, **kwargs):
 
 
 class YieldFuture(YieldPoint):
-    def __init__(self, future, io_loop=None):
+    def __init__(self, future):
         """Adapts a `.Future` to the `YieldPoint` interface.
 
-        .. versionchanged:: 4.1
-           The ``io_loop`` argument is deprecated.
+        .. versionchanged:: 5.0
+           The ``io_loop`` argument (deprecated since version 4.1) has been removed.
         """
         self.future = future
-        self.io_loop = io_loop or IOLoop.current()
+        self.io_loop = IOLoop.current()
 
     def start(self, runner):
         if not self.future.done():
@@ -681,6 +714,7 @@ def multi(children, quiet_exceptions=()):
         return MultiYieldPoint(children, quiet_exceptions=quiet_exceptions)
     else:
         return multi_future(children, quiet_exceptions=quiet_exceptions)
+
 
 Multi = multi
 
@@ -793,7 +827,7 @@ def multi_future(children, quiet_exceptions=()):
                             app_log.error("Multiple exceptions in yield list",
                                           exc_info=True)
                     else:
-                        future.set_exc_info(sys.exc_info())
+                        future_set_exc_info(future, sys.exc_info())
             if not future.done():
                 if keys is not None:
                     future.set_result(dict(zip(keys, result_list)))
@@ -804,7 +838,7 @@ def multi_future(children, quiet_exceptions=()):
     for f in children:
         if f not in listening:
             listening.add(f)
-            f.add_done_callback(callback)
+            future_add_done_callback(f, callback)
     return future
 
 
@@ -829,27 +863,30 @@ def maybe_future(x):
         return fut
 
 
-def with_timeout(timeout, future, io_loop=None, quiet_exceptions=()):
-    """Wraps a `.Future` in a timeout.
+def with_timeout(timeout, future, quiet_exceptions=()):
+    """Wraps a `.Future` (or other yieldable object) in a timeout.
 
-    Raises `TimeoutError` if the input future does not complete before
-    ``timeout``, which may be specified in any form allowed by
-    `.IOLoop.add_timeout` (i.e. a `datetime.timedelta` or an absolute time
-    relative to `.IOLoop.time`)
+    Raises `tornado.util.TimeoutError` if the input future does not
+    complete before ``timeout``, which may be specified in any form
+    allowed by `.IOLoop.add_timeout` (i.e. a `datetime.timedelta` or
+    an absolute time relative to `.IOLoop.time`)
 
     If the wrapped `.Future` fails after it has timed out, the exception
     will be logged unless it is of a type contained in ``quiet_exceptions``
     (which may be an exception type or a sequence of types).
 
-    Currently only supports Futures, not other `YieldPoint` classes.
+    Does not support `YieldPoint` subclasses.
 
     .. versionadded:: 4.0
 
     .. versionchanged:: 4.1
        Added the ``quiet_exceptions`` argument and the logging of unhandled
        exceptions.
+
+    .. versionchanged:: 4.4
+       Added support for yieldable objects other than `.Future`.
     """
-    # TODO: allow yield points in addition to futures?
+    # TODO: allow YieldPoints in addition to other yieldables?
     # Tricky to do with stack_context semantics.
     #
     # It's tempting to optimize this by cancelling the input future on timeout
@@ -857,10 +894,10 @@ def with_timeout(timeout, future, io_loop=None, quiet_exceptions=()):
     # one waiting on the input future, so cancelling it might disrupt other
     # callers and B) concurrent futures can only be cancelled while they are
     # in the queue, so cancellation cannot reliably bound our waiting time.
+    future = convert_yielded(future)
     result = Future()
     chain_future(future, result)
-    if io_loop is None:
-        io_loop = IOLoop.current()
+    io_loop = IOLoop.current()
 
     def error_callback(future):
         try:
@@ -871,16 +908,17 @@ def with_timeout(timeout, future, io_loop=None, quiet_exceptions=()):
                               future, exc_info=True)
 
     def timeout_callback():
-        result.set_exception(TimeoutError("Timeout"))
+        if not result.done():
+            result.set_exception(TimeoutError("Timeout"))
         # In case the wrapped future goes on to fail, log it.
-        future.add_done_callback(error_callback)
+        future_add_done_callback(future, error_callback)
     timeout_handle = io_loop.add_timeout(
         timeout, timeout_callback)
     if isinstance(future, Future):
         # We know this future will resolve on the IOLoop, so we don't
         # need the extra thread-safety of IOLoop.add_future (and we also
         # don't care about StackContext here.
-        future.add_done_callback(
+        future_add_done_callback(future,
             lambda future: io_loop.remove_timeout(timeout_handle))
     else:
         # concurrent.futures.Futures may resolve on any thread, so we
@@ -923,6 +961,10 @@ coroutines that are likely to yield Futures that are ready instantly.
 Usage: ``yield gen.moment``
 
 .. versionadded:: 4.0
+
+.. deprecated:: 4.5
+   ``yield None`` (or ``yield`` with no argument) is now equivalent to
+    ``yield gen.moment``.
 """
 moment.set_result(None)
 
@@ -933,7 +975,7 @@ class Runner(object):
     Maintains information about pending callbacks and their results.
 
     The results of the generator are stored in ``result_future`` (a
-    `.TracebackFuture`)
+    `.Future`)
     """
     def __init__(self, gen, result_future, first_yielded):
         self.gen = gen
@@ -953,6 +995,7 @@ class Runner(object):
         # of the coroutine.
         self.stack_context_deactivate = None
         if self.handle_yield(first_yielded):
+            gen = result_future = first_yielded = None
             self.run()
 
     def register_callback(self, key):
@@ -978,7 +1021,7 @@ class Runner(object):
             try:
                 self.future.set_result(self.yield_point.get_result())
             except:
-                self.future.set_exc_info(sys.exc_info())
+                future_set_exc_info(self.future, sys.exc_info())
             self.yield_point = None
             self.run()
 
@@ -1009,10 +1052,15 @@ class Runner(object):
                     except Exception:
                         self.had_exception = True
                         exc_info = sys.exc_info()
+                    future = None
 
                     if exc_info is not None:
-                        yielded = self.gen.throw(*exc_info)
-                        exc_info = None
+                        try:
+                            yielded = self.gen.throw(*exc_info)
+                        finally:
+                            # Break up a reference to itself
+                            # for faster GC on CPython.
+                            exc_info = None
                     else:
                         yielded = self.gen.send(value)
 
@@ -1039,12 +1087,13 @@ class Runner(object):
                 except Exception:
                     self.finished = True
                     self.future = _null_future
-                    self.result_future.set_exc_info(sys.exc_info())
+                    future_set_exc_info(self.result_future, sys.exc_info())
                     self.result_future = None
                     self._deactivate_stack_context()
                     return
                 if not self.handle_yield(yielded):
                     return
+                yielded = None
         finally:
             self.running = False
 
@@ -1057,7 +1106,7 @@ class Runner(object):
         if isinstance(yielded, YieldPoint):
             # YieldPoints are too closely coupled to the Runner to go
             # through the generic convert_yielded mechanism.
-            self.future = TracebackFuture()
+            self.future = Future()
 
             def start_yield_point():
                 try:
@@ -1068,8 +1117,8 @@ class Runner(object):
                     else:
                         self.yield_point = yielded
                 except Exception:
-                    self.future = TracebackFuture()
-                    self.future.set_exc_info(sys.exc_info())
+                    self.future = Future()
+                    future_set_exc_info(self.future, sys.exc_info())
 
             if self.stack_context_deactivate is None:
                 # Start a stack context if this is the first
@@ -1089,12 +1138,19 @@ class Runner(object):
             try:
                 self.future = convert_yielded(yielded)
             except BadYieldError:
-                self.future = TracebackFuture()
-                self.future.set_exc_info(sys.exc_info())
+                self.future = Future()
+                future_set_exc_info(self.future, sys.exc_info())
 
-        if not self.future.done() or self.future is moment:
+        if self.future is moment:
+            self.io_loop.add_callback(self.run)
+            return False
+        elif not self.future.done():
+            def inner(f):
+                # Break a reference cycle to speed GC.
+                f = None # noqa
+                self.run()
             self.io_loop.add_future(
-                self.future, lambda f: self.run())
+                self.future, inner)
             return False
         return True
 
@@ -1104,8 +1160,8 @@ class Runner(object):
 
     def handle_exception(self, typ, value, tb):
         if not self.running and not self.finished:
-            self.future = TracebackFuture()
-            self.future.set_exc_info((typ, value, tb))
+            self.future = Future()
+            future_set_exc_info(self.future, (typ, value, tb))
             self.run()
             return True
         else:
@@ -1115,6 +1171,7 @@ class Runner(object):
         if self.stack_context_deactivate is not None:
             self.stack_context_deactivate()
             self.stack_context_deactivate = None
+
 
 Arguments = collections.namedtuple('Arguments', ['args', 'kwargs'])
 
@@ -1134,6 +1191,7 @@ def _argument_adapter(callback):
         else:
             callback(None)
     return wrapper
+
 
 # Convert Awaitables into Futures. It is unfortunately possible
 # to have infinite recursion here if those Awaitables assume that
@@ -1212,7 +1270,9 @@ def convert_yielded(yielded):
     .. versionadded:: 4.1
     """
     # Lists and dicts containing YieldPoints were handled earlier.
-    if isinstance(yielded, (list, dict)):
+    if yielded is None:
+        return moment
+    elif isinstance(yielded, (list, dict)):
         return multi(yielded)
     elif is_future(yielded):
         return yielded
@@ -1221,21 +1281,6 @@ def convert_yielded(yielded):
     else:
         raise BadYieldError("yielded unknown object %r" % (yielded,))
 
+
 if singledispatch is not None:
     convert_yielded = singledispatch(convert_yielded)
-
-    try:
-        # If we can import t.p.asyncio, do it for its side effect
-        # (registering asyncio.Future with convert_yielded).
-        # It's ugly to do this here, but it prevents a cryptic
-        # infinite recursion in _wrap_awaitable.
-        # Note that even with this, asyncio integration is unlikely
-        # to work unless the application also configures AsyncIOLoop,
-        # but at least the error messages in that case are more
-        # comprehensible than a stack overflow.
-        import tornado.platform.asyncio
-    except ImportError:
-        pass
-    else:
-        # Reference the imported module to make pyflakes happy.
-        tornado

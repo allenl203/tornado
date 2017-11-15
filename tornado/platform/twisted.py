@@ -21,7 +21,7 @@ depending on which library's underlying event loop you want to use.
 This module has been tested with Twisted versions 11.0.0 and newer.
 """
 
-from __future__ import absolute_import, division, print_function, with_statement
+from __future__ import absolute_import, division, print_function
 
 import datetime
 import functools
@@ -29,21 +29,20 @@ import numbers
 import socket
 import sys
 
-import twisted.internet.abstract
-from twisted.internet.defer import Deferred
-from twisted.internet.posixbase import PosixReactorBase
-from twisted.internet.interfaces import \
-    IReactorFDSet, IDelayedCall, IReactorTime, IReadDescriptor, IWriteDescriptor
-from twisted.python import failure, log
-from twisted.internet import error
-import twisted.names.cache
-import twisted.names.client
-import twisted.names.hosts
-import twisted.names.resolve
+import twisted.internet.abstract  # type: ignore
+from twisted.internet.defer import Deferred  # type: ignore
+from twisted.internet.posixbase import PosixReactorBase  # type: ignore
+from twisted.internet.interfaces import IReactorFDSet, IDelayedCall, IReactorTime, IReadDescriptor, IWriteDescriptor  # type: ignore
+from twisted.python import failure, log  # type: ignore
+from twisted.internet import error  # type: ignore
+import twisted.names.cache  # type: ignore
+import twisted.names.client  # type: ignore
+import twisted.names.hosts  # type: ignore
+import twisted.names.resolve  # type: ignore
 
-from zope.interface import implementer
+from zope.interface import implementer  # type: ignore
 
-from tornado.concurrent import Future
+from tornado.concurrent import Future, future_set_exc_info
 from tornado.escape import utf8
 from tornado import gen
 import tornado.ioloop
@@ -113,7 +112,7 @@ class TornadoReactor(PosixReactorBase):
     instead of ``reactor.run()``.
 
     It is also possible to create a non-global reactor by calling
-    ``tornado.platform.twisted.TornadoReactor(io_loop)``.  However, if
+    ``tornado.platform.twisted.TornadoReactor()``.  However, if
     the `.IOLoop` and reactor are to be short-lived (such as those used in
     unit tests), additional cleanup may be required.  Specifically, it is
     recommended to call::
@@ -123,13 +122,11 @@ class TornadoReactor(PosixReactorBase):
 
     before closing the `.IOLoop`.
 
-    .. versionchanged:: 4.1
-       The ``io_loop`` argument is deprecated.
+    .. versionchanged:: 5.0
+       The ``io_loop`` argument (deprecated since version 4.1) has been removed.
     """
-    def __init__(self, io_loop=None):
-        if not io_loop:
-            io_loop = tornado.ioloop.IOLoop.current()
-        self._io_loop = io_loop
+    def __init__(self):
+        self._io_loop = tornado.ioloop.IOLoop.current()
         self._readers = {}  # map of reader objects to fd
         self._writers = {}  # map of writer objects to fd
         self._fds = {}  # a map of fd to a (reader, writer) tuple
@@ -320,7 +317,10 @@ class _TestReactor(TornadoReactor):
     """
     def __init__(self):
         # always use a new ioloop
-        super(_TestReactor, self).__init__(IOLoop())
+        IOLoop.clear_current()
+        IOLoop(make_current=True)
+        super(_TestReactor, self).__init__()
+        IOLoop.clear_current()
 
     def listenTCP(self, port, factory, backlog=50, interface=''):
         # default to localhost to avoid firewall prompts on the mac
@@ -336,7 +336,7 @@ class _TestReactor(TornadoReactor):
             port, protocol, interface=interface, maxPacketSize=maxPacketSize)
 
 
-def install(io_loop=None):
+def install():
     """Install this package as the default Twisted reactor.
 
     ``install()`` must be called very early in the startup process,
@@ -347,14 +347,12 @@ def install(io_loop=None):
     in multi-process mode, and an external process manager such as
     ``supervisord`` is recommended instead.
 
-    .. versionchanged:: 4.1
-       The ``io_loop`` argument is deprecated.
+    .. versionchanged:: 5.0
+       The ``io_loop`` argument (deprecated since version 4.1) has been removed.
 
     """
-    if not io_loop:
-        io_loop = tornado.ioloop.IOLoop.current()
-    reactor = TornadoReactor(io_loop)
-    from twisted.internet.main import installReactor
+    reactor = TornadoReactor()
+    from twisted.internet.main import installReactor  # type: ignore
     installReactor(reactor)
     return reactor
 
@@ -385,6 +383,8 @@ class _FD(object):
             self.handler(self.fileobj, tornado.ioloop.IOLoop.ERROR)
             self.lost = True
 
+    writeConnectionLost = readConnectionLost = connectionLost
+
     def logPrefix(self):
         return ''
 
@@ -408,11 +408,14 @@ class TwistedIOLoop(tornado.ioloop.IOLoop):
     Not compatible with `tornado.process.Subprocess.set_exit_callback`
     because the ``SIGCHLD`` handlers used by Tornado and Twisted conflict
     with each other.
+
+    See also :meth:`tornado.ioloop.IOLoop.install` for general notes on
+    installing alternative IOLoops.
     """
     def initialize(self, reactor=None, **kwargs):
         super(TwistedIOLoop, self).initialize(**kwargs)
         if reactor is None:
-            import twisted.internet.reactor
+            import twisted.internet.reactor  # type: ignore
             reactor = twisted.internet.reactor
         self.reactor = reactor
         self.fds = {}
@@ -524,14 +527,13 @@ class TwistedResolver(Resolver):
 
     Requires Twisted 12.1 or newer.
 
-    .. versionchanged:: 4.1
-       The ``io_loop`` argument is deprecated.
+    .. versionchanged:: 5.0
+       The ``io_loop`` argument (deprecated since version 4.1) has been removed.
     """
-    def initialize(self, io_loop=None):
-        self.io_loop = io_loop or IOLoop.current()
+    def initialize(self):
         # partial copy of twisted.names.client.createResolver, which doesn't
         # allow for a reactor to be passed in.
-        self.reactor = tornado.platform.twisted.TornadoReactor(io_loop)
+        self.reactor = tornado.platform.twisted.TornadoReactor()
 
         host_resolver = twisted.names.hosts.Resolver('/etc/hosts')
         cache_resolver = twisted.names.cache.CacheResolver(reactor=self.reactor)
@@ -554,7 +556,10 @@ class TwistedResolver(Resolver):
             deferred = self.resolver.getHostByName(utf8(host))
             resolved = yield gen.Task(deferred.addBoth)
             if isinstance(resolved, failure.Failure):
-                resolved.raiseException()
+                try:
+                    resolved.raiseException()
+                except twisted.names.error.DomainError as e:
+                    raise IOError(e)
             elif twisted.internet.abstract.isIPAddress(resolved):
                 resolved_family = socket.AF_INET
             elif twisted.internet.abstract.isIPv6Address(resolved):
@@ -569,8 +574,9 @@ class TwistedResolver(Resolver):
         ]
         raise gen.Return(result)
 
+
 if hasattr(gen.convert_yielded, 'register'):
-    @gen.convert_yielded.register(Deferred)
+    @gen.convert_yielded.register(Deferred)  # type: ignore
     def _(d):
         f = Future()
 
@@ -580,6 +586,6 @@ if hasattr(gen.convert_yielded, 'register'):
                 # Should never happen, but just in case
                 raise Exception("errback called without error")
             except:
-                f.set_exc_info(sys.exc_info())
+                future_set_exc_info(f, sys.exc_info())
         d.addCallbacks(f.set_result, errback)
         return f

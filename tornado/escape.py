@@ -20,11 +20,10 @@ Also includes a few other miscellaneous string manipulation functions that
 have crept in over time.
 """
 
-from __future__ import absolute_import, division, print_function, with_statement
+from __future__ import absolute_import, division, print_function
 
 import json
 import re
-import sys
 
 from tornado.util import PY3, unicode_type, basestring_type
 
@@ -37,6 +36,11 @@ else:
     from urlparse import parse_qs as _parse_qs
     import htmlentitydefs
     import urllib as urllib_parse
+
+try:
+    import typing  # noqa
+except ImportError:
+    pass
 
 
 _XHTML_ESCAPE_RE = re.compile('[&<>"\']')
@@ -181,6 +185,7 @@ _UTF8_TYPES = (bytes, type(None))
 
 
 def utf8(value):
+    # type: (typing.Union[bytes,unicode_type,None])->typing.Union[bytes,None]
     """Converts a string argument to a byte string.
 
     If the argument is already a byte string or None, it is returned unchanged.
@@ -193,6 +198,7 @@ def utf8(value):
             "Expected bytes, unicode, or None; got %r" % type(value)
         )
     return value.encode("utf-8")
+
 
 _TO_UNICODE_TYPES = (unicode_type, type(None))
 
@@ -210,6 +216,7 @@ def to_unicode(value):
             "Expected bytes, unicode, or None; got %r" % type(value)
         )
     return value.decode("utf-8")
+
 
 # to_unicode was previously named _unicode not because it was private,
 # but to avoid conflicts with the built-in unicode() function/type
@@ -258,6 +265,7 @@ def recursive_unicode(obj):
         return to_unicode(obj)
     else:
         return obj
+
 
 # I originally used the regex from
 # http://daringfireball.net/2010/07/improved_regex_for_matching_urls
@@ -385,5 +393,6 @@ def _build_unicode_map():
     for name, value in htmlentitydefs.name2codepoint.items():
         unicode_map[name] = unichr(value)
     return unicode_map
+
 
 _HTML_UNICODE_MAP = _build_unicode_map()

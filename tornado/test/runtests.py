@@ -1,6 +1,6 @@
 #!/usr/bin/env python
 
-from __future__ import absolute_import, division, print_function, with_statement
+from __future__ import absolute_import, division, print_function
 import gc
 import locale  # system locale module, not tornado.locale
 import logging
@@ -25,6 +25,7 @@ TEST_MODULES = [
     'tornado.util.doctests',
     'tornado.test.asyncio_test',
     'tornado.test.auth_test',
+    'tornado.test.autoreload_test',
     'tornado.test.concurrent_test',
     'tornado.test.curl_httpclient_test',
     'tornado.test.escape_test',
@@ -43,6 +44,7 @@ TEST_MODULES = [
     'tornado.test.options_test',
     'tornado.test.process_test',
     'tornado.test.queues_test',
+    'tornado.test.routing_test',
     'tornado.test.simple_httpclient_test',
     'tornado.test.stack_context_test',
     'tornado.test.tcpclient_test',
@@ -53,6 +55,7 @@ TEST_MODULES = [
     'tornado.test.util_test',
     'tornado.test.web_test',
     'tornado.test.websocket_test',
+    'tornado.test.windows_test',
     'tornado.test.wsgi_test',
 ]
 
@@ -78,13 +81,15 @@ class LogCounter(logging.Filter):
     def __init__(self, *args, **kwargs):
         # Can't use super() because logging.Filter is an old-style class in py26
         logging.Filter.__init__(self, *args, **kwargs)
-        self.warning_count = self.error_count = 0
+        self.info_count = self.warning_count = self.error_count = 0
 
     def filter(self, record):
         if record.levelno >= logging.ERROR:
             self.error_count += 1
         elif record.levelno >= logging.WARNING:
             self.warning_count += 1
+        elif record.levelno >= logging.INFO:
+            self.info_count += 1
         return True
 
 
@@ -113,13 +118,16 @@ def main():
     # 2.7 and 3.2
     warnings.filterwarnings("ignore", category=DeprecationWarning,
                             message="Please use assert.* instead")
-    # unittest2 0.6 on py26 reports these as PendingDeprecationWarnings
-    # instead of DeprecationWarnings.
-    warnings.filterwarnings("ignore", category=PendingDeprecationWarning,
-                            message="Please use assert.* instead")
     # Twisted 15.0.0 triggers some warnings on py3 with -bb.
     warnings.filterwarnings("ignore", category=BytesWarning,
                             module=r"twisted\..*")
+    if (3,) < sys.version_info < (3, 6):
+        # Prior to 3.6, async ResourceWarnings were rather noisy
+        # and even
+        # `python3.4 -W error -c 'import asyncio; asyncio.get_event_loop()'`
+        # would generate a warning.
+        warnings.filterwarnings("ignore", category=ResourceWarning,
+                                module=r"asyncio\..*")
 
     logging.getLogger("tornado.access").setLevel(logging.CRITICAL)
 
@@ -168,13 +176,17 @@ def main():
     try:
         tornado.testing.main(**kwargs)
     finally:
-        # The tests should run clean; consider it a failure if they logged
-        # any warnings or errors. We'd like to ban info logs too, but
-        # we can't count them cleanly due to interactions with LogTrapTestCase.
-        if log_counter.warning_count > 0 or log_counter.error_count > 0:
-            logging.error("logged %d warnings and %d errors",
-                          log_counter.warning_count, log_counter.error_count)
+        # The tests should run clean; consider it a failure if they
+        # logged anything at info level or above (except for the one
+        # allowed info message "PASS")
+        if (log_counter.info_count > 1 or
+            log_counter.warning_count > 0 or
+            log_counter.error_count > 0):
+            logging.error("logged %d infos, %d warnings, and %d errors",
+                          log_counter.info_count, log_counter.warning_count,
+                          log_counter.error_count)
             sys.exit(1)
+
 
 if __name__ == '__main__':
     main()

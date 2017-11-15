@@ -1,7 +1,7 @@
 #!/usr/bin/env python
 
 
-from __future__ import absolute_import, division, print_function, with_statement
+from __future__ import absolute_import, division, print_function
 from tornado import netutil
 from tornado.escape import json_decode, json_encode, utf8, _unicode, recursive_unicode, native_str
 from tornado import gen
@@ -29,18 +29,20 @@ from io import BytesIO
 
 def read_stream_body(stream, callback):
     """Reads an HTTP response from `stream` and runs callback with its
-    headers and body."""
+    start_line, headers and body."""
     chunks = []
 
     class Delegate(HTTPMessageDelegate):
         def headers_received(self, start_line, headers):
             self.headers = headers
+            self.start_line = start_line
 
         def data_received(self, chunk):
             chunks.append(chunk)
 
         def finish(self):
-            callback((self.headers, b''.join(chunks)))
+            conn.detach()
+            callback((self.start_line, self.headers, b''.join(chunks)))
     conn = HTTP1Connection(stream, True)
     conn.read_response(Delegate())
 
@@ -86,7 +88,7 @@ class BaseSSLTest(AsyncHTTPSTestCase):
 
 class SSLTestMixin(object):
     def get_ssl_options(self):
-        return dict(ssl_version=self.get_ssl_version(),
+        return dict(ssl_version=self.get_ssl_version(),  # type: ignore
                     **AsyncHTTPSTestCase.get_ssl_options())
 
     def get_ssl_version(self):
@@ -149,7 +151,6 @@ class TLSv1Test(BaseSSLTest, SSLTestMixin):
         return ssl.PROTOCOL_TLSv1
 
 
-@unittest.skipIf(not hasattr(ssl, 'SSLContext'), 'ssl.SSLContext not present')
 class SSLContextTest(BaseSSLTest, SSLTestMixin):
     def get_ssl_options(self):
         context = ssl_options_to_context(
@@ -217,7 +218,7 @@ class HTTPConnectionTest(AsyncHTTPTestCase):
                              [utf8("Content-Length: %d" % len(body))]) +
                 newline + newline + body)
             read_stream_body(stream, self.stop)
-            headers, body = self.wait()
+            start_line, headers, body = self.wait()
             return body
 
     def test_multipart_form(self):
@@ -256,7 +257,7 @@ class HTTPConnectionTest(AsyncHTTPTestCase):
         # Run through a 100-continue interaction by hand:
         # When given Expect: 100-continue, we get a 100 response after the
         # headers, and then the real response after the body.
-        stream = IOStream(socket.socket(), io_loop=self.io_loop)
+        stream = IOStream(socket.socket())
         stream.connect(("127.0.0.1", self.get_http_port()), callback=self.stop)
         self.wait()
         stream.write(b"\r\n".join([b"POST /hello HTTP/1.1",
@@ -406,19 +407,28 @@ class HTTPServerRawTest(AsyncHTTPTestCase):
         self.io_loop.add_timeout(datetime.timedelta(seconds=0.001), self.stop)
         self.wait()
 
-    def test_malformed_first_line(self):
+    def test_malformed_first_line_response(self):
+        with ExpectLog(gen_log, '.*Malformed HTTP request line'):
+            self.stream.write(b'asdf\r\n\r\n')
+            read_stream_body(self.stream, self.stop)
+            start_line, headers, response = self.wait()
+            self.assertEqual('HTTP/1.1', start_line.version)
+            self.assertEqual(400, start_line.code)
+            self.assertEqual('Bad Request', start_line.reason)
+
+    def test_malformed_first_line_log(self):
         with ExpectLog(gen_log, '.*Malformed HTTP request line'):
             self.stream.write(b'asdf\r\n\r\n')
             # TODO: need an async version of ExpectLog so we don't need
             # hard-coded timeouts here.
-            self.io_loop.add_timeout(datetime.timedelta(seconds=0.01),
+            self.io_loop.add_timeout(datetime.timedelta(seconds=0.05),
                                      self.stop)
             self.wait()
 
     def test_malformed_headers(self):
         with ExpectLog(gen_log, '.*Malformed HTTP headers'):
             self.stream.write(b'GET / HTTP/1.0\r\nasdf\r\n\r\n')
-            self.io_loop.add_timeout(datetime.timedelta(seconds=0.01),
+            self.io_loop.add_timeout(datetime.timedelta(seconds=0.05),
                                      self.stop)
             self.wait()
 
@@ -438,8 +448,39 @@ bar
 
 """.replace(b"\n", b"\r\n"))
         read_stream_body(self.stream, self.stop)
-        headers, response = self.wait()
+        start_line, headers, response = self.wait()
         self.assertEqual(json_decode(response), {u'foo': [u'bar']})
+
+    def test_chunked_request_uppercase(self):
+        # As per RFC 2616 section 3.6, "Transfer-Encoding" header's value is
+        # case-insensitive.
+        self.stream.write(b"""\
+POST /echo HTTP/1.1
+Transfer-Encoding: Chunked
+Content-Type: application/x-www-form-urlencoded
+
+4
+foo=
+3
+bar
+0
+
+""".replace(b"\n", b"\r\n"))
+        read_stream_body(self.stream, self.stop)
+        start_line, headers, response = self.wait()
+        self.assertEqual(json_decode(response), {u'foo': [u'bar']})
+
+    def test_invalid_content_length(self):
+        with ExpectLog(gen_log, '.*Only integer Content-Length is allowed'):
+            self.stream.write(b"""\
+POST /echo HTTP/1.1
+Content-Length: foo
+
+bar
+
+""".replace(b"\n", b"\r\n"))
+            self.stream.read_until_close(self.stop)
+            self.wait()
 
 
 class XHeaderTest(HandlerBaseTestCase):
@@ -449,7 +490,7 @@ class XHeaderTest(HandlerBaseTestCase):
                             remote_protocol=self.request.protocol))
 
     def get_httpserver_options(self):
-        return dict(xheaders=True)
+        return dict(xheaders=True, trusted_downstream=['5.5.5.5'])
 
     def test_ip_headers(self):
         self.assertEqual(self.fetch_json("/")["remote_ip"], "127.0.0.1")
@@ -488,6 +529,13 @@ class XHeaderTest(HandlerBaseTestCase):
         self.assertEqual(
             self.fetch_json("/", headers=invalid_host)["remote_ip"],
             "127.0.0.1")
+
+    def test_trusted_downstream(self):
+
+        valid_ipv4_list = {"X-Forwarded-For": "127.0.0.1, 4.4.4.4, 5.5.5.5"}
+        self.assertEqual(
+            self.fetch_json("/", headers=valid_ipv4_list)["remote_ip"],
+            "4.4.4.4")
 
     def test_scheme_headers(self):
         self.assertEqual(self.fetch_json("/")["remote_protocol"], "http")
@@ -559,14 +607,15 @@ class UnixSocketTest(AsyncTestCase):
         self.sockfile = os.path.join(self.tmpdir, "test.sock")
         sock = netutil.bind_unix_socket(self.sockfile)
         app = Application([("/hello", HelloWorldRequestHandler)])
-        self.server = HTTPServer(app, io_loop=self.io_loop)
+        self.server = HTTPServer(app)
         self.server.add_socket(sock)
-        self.stream = IOStream(socket.socket(socket.AF_UNIX), io_loop=self.io_loop)
+        self.stream = IOStream(socket.socket(socket.AF_UNIX))
         self.stream.connect(self.sockfile, self.stop)
         self.wait()
 
     def tearDown(self):
         self.stream.close()
+        self.io_loop.run_sync(self.server.close_all_connections)
         self.server.stop()
         shutil.rmtree(self.tmpdir)
         super(UnixSocketTest, self).tearDown()
@@ -589,7 +638,7 @@ class UnixSocketTest(AsyncTestCase):
             self.stream.write(b"garbage\r\n\r\n")
             self.stream.read_until_close(self.stop)
             response = self.wait()
-        self.assertEqual(response, b"")
+        self.assertEqual(response, b"HTTP/1.1 400 Bad Request\r\n\r\n")
 
 
 class KeepAliveTest(AsyncHTTPTestCase):
@@ -643,7 +692,7 @@ class KeepAliveTest(AsyncHTTPTestCase):
 
     # The next few methods are a crude manual http client
     def connect(self):
-        self.stream = IOStream(socket.socket(), io_loop=self.io_loop)
+        self.stream = IOStream(socket.socket())
         self.stream.connect(('127.0.0.1', self.get_http_port()), self.stop)
         self.wait()
 
@@ -681,6 +730,7 @@ class KeepAliveTest(AsyncHTTPTestCase):
         self.stream.read_until_close(callback=self.stop)
         data = self.wait()
         self.assertTrue(not data)
+        self.assertEqual(self.headers['Connection'], 'close')
         self.close()
 
     # keepalive is supported for http 1.0 too, but it's opt-in
@@ -804,7 +854,7 @@ class StreamingChunkSizeTest(AsyncHTTPTestCase):
     def get_http_client(self):
         # body_producer doesn't work on curl_httpclient, so override the
         # configured AsyncHTTPClient implementation.
-        return SimpleAsyncHTTPClient(io_loop=self.io_loop)
+        return SimpleAsyncHTTPClient()
 
     def get_httpserver_options(self):
         return dict(chunk_size=self.CHUNK_SIZE, decompress_request=True)
@@ -987,7 +1037,7 @@ class BodyLimitsTest(AsyncHTTPTestCase):
     def get_http_client(self):
         # body_producer doesn't work on curl_httpclient, so override the
         # configured AsyncHTTPClient implementation.
-        return SimpleAsyncHTTPClient(io_loop=self.io_loop)
+        return SimpleAsyncHTTPClient()
 
     def test_small_body(self):
         response = self.fetch('/buffered', method='PUT', body=b'a' * 4096)
@@ -998,24 +1048,26 @@ class BodyLimitsTest(AsyncHTTPTestCase):
     def test_large_body_buffered(self):
         with ExpectLog(gen_log, '.*Content-Length too long'):
             response = self.fetch('/buffered', method='PUT', body=b'a' * 10240)
-        self.assertEqual(response.code, 599)
+        self.assertEqual(response.code, 400)
 
     def test_large_body_buffered_chunked(self):
         with ExpectLog(gen_log, '.*chunked body too large'):
             response = self.fetch('/buffered', method='PUT',
                                   body_producer=lambda write: write(b'a' * 10240))
-        self.assertEqual(response.code, 599)
+        # this test is flaky on windows; accept 400 (expected) or 599
+        self.assertIn(response.code, [400, 599])
 
     def test_large_body_streaming(self):
         with ExpectLog(gen_log, '.*Content-Length too long'):
             response = self.fetch('/streaming', method='PUT', body=b'a' * 10240)
-        self.assertEqual(response.code, 599)
+        self.assertEqual(response.code, 400)
 
     def test_large_body_streaming_chunked(self):
         with ExpectLog(gen_log, '.*chunked body too large'):
             response = self.fetch('/streaming', method='PUT',
                                   body_producer=lambda write: write(b'a' * 10240))
-        self.assertEqual(response.code, 599)
+        # this test is flaky on windows; accept 400 (expected) or 599
+        self.assertIn(response.code, [400, 599])
 
     def test_large_body_streaming_override(self):
         response = self.fetch('/streaming?expected_size=10240', method='PUT',
@@ -1052,14 +1104,14 @@ class BodyLimitsTest(AsyncHTTPTestCase):
             stream.write(b'PUT /streaming?expected_size=10240 HTTP/1.1\r\n'
                          b'Content-Length: 10240\r\n\r\n')
             stream.write(b'a' * 10240)
-            headers, response = yield gen.Task(read_stream_body, stream)
+            start_line, headers, response = yield gen.Task(read_stream_body, stream)
             self.assertEqual(response, b'10240')
             # Without the ?expected_size parameter, we get the old default value
             stream.write(b'PUT /streaming HTTP/1.1\r\n'
                          b'Content-Length: 10240\r\n\r\n')
             with ExpectLog(gen_log, '.*Content-Length too long'):
                 data = yield stream.read_until_close()
-            self.assertEqual(data, b'')
+            self.assertEqual(data, b'HTTP/1.1 400 Bad Request\r\n\r\n')
         finally:
             stream.close()
 

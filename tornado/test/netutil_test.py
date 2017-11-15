@@ -1,5 +1,6 @@
-from __future__ import absolute_import, division, print_function, with_statement
+from __future__ import absolute_import, division, print_function
 
+import errno
 import os
 import signal
 import socket
@@ -18,15 +19,15 @@ except ImportError:
     futures = None
 
 try:
-    import pycares
+    import pycares  # type: ignore
 except ImportError:
     pycares = None
 else:
     from tornado.platform.caresresolver import CaresResolver
 
 try:
-    import twisted
-    import twisted.names
+    import twisted  # type: ignore
+    import twisted.names  # type: ignore
 except ImportError:
     twisted = None
 else:
@@ -63,21 +64,21 @@ class _ResolverErrorTestMixin(object):
 
     @gen_test
     def test_future_interface_bad_host(self):
-        with self.assertRaises(Exception):
+        with self.assertRaises(IOError):
             yield self.resolver.resolve('an invalid domain', 80,
                                         socket.AF_UNSPEC)
 
 
 def _failing_getaddrinfo(*args):
     """Dummy implementation of getaddrinfo for use in mocks"""
-    raise socket.gaierror("mock: lookup failed")
+    raise socket.gaierror(errno.EIO, "mock: lookup failed")
 
 
 @skipIfNoNetwork
 class BlockingResolverTest(AsyncTestCase, _ResolverTestMixin):
     def setUp(self):
         super(BlockingResolverTest, self).setUp()
-        self.resolver = BlockingResolver(io_loop=self.io_loop)
+        self.resolver = BlockingResolver()
 
 
 # getaddrinfo-based tests need mocking to reliably generate errors;
@@ -86,7 +87,7 @@ class BlockingResolverTest(AsyncTestCase, _ResolverTestMixin):
 class BlockingResolverErrorTest(AsyncTestCase, _ResolverErrorTestMixin):
     def setUp(self):
         super(BlockingResolverErrorTest, self).setUp()
-        self.resolver = BlockingResolver(io_loop=self.io_loop)
+        self.resolver = BlockingResolver()
         self.real_getaddrinfo = socket.getaddrinfo
         socket.getaddrinfo = _failing_getaddrinfo
 
@@ -100,7 +101,7 @@ class BlockingResolverErrorTest(AsyncTestCase, _ResolverErrorTestMixin):
 class ThreadedResolverTest(AsyncTestCase, _ResolverTestMixin):
     def setUp(self):
         super(ThreadedResolverTest, self).setUp()
-        self.resolver = ThreadedResolver(io_loop=self.io_loop)
+        self.resolver = ThreadedResolver()
 
     def tearDown(self):
         self.resolver.close()
@@ -110,7 +111,7 @@ class ThreadedResolverTest(AsyncTestCase, _ResolverTestMixin):
 class ThreadedResolverErrorTest(AsyncTestCase, _ResolverErrorTestMixin):
     def setUp(self):
         super(ThreadedResolverErrorTest, self).setUp()
-        self.resolver = BlockingResolver(io_loop=self.io_loop)
+        self.resolver = BlockingResolver()
         self.real_getaddrinfo = socket.getaddrinfo
         socket.getaddrinfo = _failing_getaddrinfo
 
@@ -157,7 +158,7 @@ class ThreadedResolverImportTest(unittest.TestCase):
 class CaresResolverTest(AsyncTestCase, _ResolverTestMixin):
     def setUp(self):
         super(CaresResolverTest, self).setUp()
-        self.resolver = CaresResolver(io_loop=self.io_loop)
+        self.resolver = CaresResolver()
 
 
 # TwistedResolver produces consistent errors in our test cases so we
@@ -169,7 +170,7 @@ class TwistedResolverTest(AsyncTestCase, _ResolverTestMixin,
                           _ResolverErrorTestMixin):
     def setUp(self):
         super(TwistedResolverTest, self).setUp()
-        self.resolver = TwistedResolver(io_loop=self.io_loop)
+        self.resolver = TwistedResolver()
 
 
 class IsValidIPTest(unittest.TestCase):
@@ -203,9 +204,10 @@ class TestPortAllocation(unittest.TestCase):
 
     @unittest.skipIf(not hasattr(socket, "SO_REUSEPORT"), "SO_REUSEPORT is not supported")
     def test_reuse_port(self):
+        sockets = []
         socket, port = bind_unused_port(reuse_port=True)
         try:
-            sockets = bind_sockets(port, 'localhost', reuse_port=True)
+            sockets = bind_sockets(port, '127.0.0.1', reuse_port=True)
             self.assertTrue(all(s.getsockname()[1] == port for s in sockets))
         finally:
             socket.close()

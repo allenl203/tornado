@@ -12,9 +12,17 @@
 # License for the specific language governing permissions and limitations
 # under the License.
 
-from __future__ import absolute_import, division, print_function, with_statement
+"""Asynchronous queues for coroutines.
 
-__all__ = ['Queue', 'PriorityQueue', 'LifoQueue', 'QueueFull', 'QueueEmpty']
+.. warning::
+
+   Unlike the standard library's `queue` module, the classes defined here
+   are *not* thread-safe. To use these queues from another thread,
+   use `.IOLoop.add_callback` to transfer control to the `.IOLoop` thread
+   before calling any queue methods.
+"""
+
+from __future__ import absolute_import, division, print_function
 
 import collections
 import heapq
@@ -22,6 +30,8 @@ import heapq
 from tornado import gen, ioloop
 from tornado.concurrent import Future
 from tornado.locks import Event
+
+__all__ = ['Queue', 'PriorityQueue', 'LifoQueue', 'QueueFull', 'QueueEmpty']
 
 
 class QueueEmpty(Exception):
@@ -37,7 +47,8 @@ class QueueFull(Exception):
 def _set_timeout(future, timeout):
     if timeout:
         def on_timeout():
-            future.set_exception(gen.TimeoutError())
+            if not future.done():
+                future.set_exception(gen.TimeoutError())
         io_loop = ioloop.IOLoop.current()
         timeout_handle = io_loop.add_timeout(timeout, on_timeout)
         future.add_done_callback(
@@ -156,8 +167,13 @@ class Queue(object):
     def put(self, item, timeout=None):
         """Put an item into the queue, perhaps waiting until there is room.
 
-        Returns a Future, which raises `tornado.gen.TimeoutError` after a
+        Returns a Future, which raises `tornado.util.TimeoutError` after a
         timeout.
+
+        ``timeout`` may be a number denoting a time (on the same
+        scale as `tornado.ioloop.IOLoop.time`, normally `time.time`), or a
+        `datetime.timedelta` object for a deadline relative to the
+        current time.
         """
         try:
             self.put_nowait(item)
@@ -189,7 +205,12 @@ class Queue(object):
         """Remove and return an item from the queue.
 
         Returns a Future which resolves once an item is available, or raises
-        `tornado.gen.TimeoutError` after a timeout.
+        `tornado.util.TimeoutError` after a timeout.
+
+        ``timeout`` may be a number denoting a time (on the same
+        scale as `tornado.ioloop.IOLoop.time`, normally `time.time`), or a
+        `datetime.timedelta` object for a deadline relative to the
+        current time.
         """
         future = Future()
         try:
@@ -238,12 +259,11 @@ class Queue(object):
     def join(self, timeout=None):
         """Block until all items in the queue are processed.
 
-        Returns a Future, which raises `tornado.gen.TimeoutError` after a
+        Returns a Future, which raises `tornado.util.TimeoutError` after a
         timeout.
         """
         return self._finished.wait(timeout)
 
-    @gen.coroutine
     def __aiter__(self):
         return _QueueIterator(self)
 

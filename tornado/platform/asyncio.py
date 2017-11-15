@@ -3,9 +3,8 @@
 .. versionadded:: 3.2
 
 This module integrates Tornado with the ``asyncio`` module introduced
-in Python 3.4 (and available `as a separate download
-<https://pypi.python.org/pypi/asyncio>`_ for Python 3.3).  This makes
-it possible to combine the two libraries on the same event loop.
+in Python 3.4. This makes it possible to combine the two libraries on
+the same event loop.
 
 Most applications should use `AsyncIOMainLoop` to run Tornado on the
 default ``asyncio`` event loop.  Applications that need to run event
@@ -14,12 +13,12 @@ loops.
 
 .. note::
 
-   Tornado requires the `~asyncio.BaseEventLoop.add_reader` family of methods,
-   so it is not compatible with the `~asyncio.ProactorEventLoop` on Windows.
-   Use the `~asyncio.SelectorEventLoop` instead.
+   Tornado requires the `~asyncio.AbstractEventLoop.add_reader` family of
+   methods, so it is not compatible with the `~asyncio.ProactorEventLoop` on
+   Windows. Use the `~asyncio.SelectorEventLoop` instead.
 """
 
-from __future__ import absolute_import, division, print_function, with_statement
+from __future__ import absolute_import, division, print_function
 import functools
 
 import tornado.concurrent
@@ -27,17 +26,7 @@ from tornado.gen import convert_yielded
 from tornado.ioloop import IOLoop
 from tornado import stack_context
 
-try:
-    # Import the real asyncio module for py33+ first.  Older versions of the
-    # trollius backport also use this name.
-    import asyncio
-except ImportError as e:
-    # Asyncio itself isn't available; see if trollius is (backport to py26+).
-    try:
-        import trollius as asyncio
-    except ImportError:
-        # Re-raise the original asyncio error, not the trollius one.
-        raise e
+import asyncio
 
 
 class BaseAsyncIOLoop(IOLoop):
@@ -116,14 +105,21 @@ class BaseAsyncIOLoop(IOLoop):
     def start(self):
         old_current = IOLoop.current(instance=False)
         try:
+            old_asyncio = asyncio.get_event_loop()
+        except RuntimeError:
+            old_asyncio = None
+        try:
             self._setup_logging()
             self.make_current()
+            # This is automatic in 3.5, but must be done manually in 3.4.
+            asyncio.set_event_loop(self.asyncio_loop)
             self.asyncio_loop.run_forever()
         finally:
             if old_current is None:
                 IOLoop.clear_current()
             else:
                 old_current.make_current()
+            asyncio.set_event_loop(old_asyncio)
 
     def stop(self):
         self.asyncio_loop.stop()
@@ -141,6 +137,8 @@ class BaseAsyncIOLoop(IOLoop):
 
     def add_callback(self, callback, *args, **kwargs):
         if self.closing:
+            # TODO: this is racy; we need a lock to ensure that the
+            # loop isn't closed during call_soon_threadsafe.
             raise RuntimeError("IOLoop is closing")
         self.asyncio_loop.call_soon_threadsafe(
             self._run_callback,
@@ -158,6 +156,9 @@ class AsyncIOMainLoop(BaseAsyncIOLoop):
         import asyncio
         AsyncIOMainLoop().install()
         asyncio.get_event_loop().run_forever()
+
+    See also :meth:`tornado.ioloop.IOLoop.install` for general notes on
+    installing alternative IOLoops.
     """
     def initialize(self, **kwargs):
         super(AsyncIOMainLoop, self).initialize(asyncio.get_event_loop(),
@@ -192,10 +193,12 @@ def to_tornado_future(asyncio_future):
     """Convert an `asyncio.Future` to a `tornado.concurrent.Future`.
 
     .. versionadded:: 4.1
+
+    .. deprecated:: 5.0
+       Tornado ``Futures`` have been merged with `asyncio.Future`,
+       so this method is now a no-op.
     """
-    tf = tornado.concurrent.Future()
-    tornado.concurrent.chain_future(asyncio_future, tf)
-    return tf
+    return asyncio_future
 
 
 def to_asyncio_future(tornado_future):
@@ -206,11 +209,9 @@ def to_asyncio_future(tornado_future):
     .. versionchanged:: 4.3
        Now accepts any yieldable object, not just
        `tornado.concurrent.Future`.
-    """
-    tornado_future = convert_yielded(tornado_future)
-    af = asyncio.Future()
-    tornado.concurrent.chain_future(tornado_future, af)
-    return af
 
-if hasattr(convert_yielded, 'register'):
-    convert_yielded.register(asyncio.Future, to_tornado_future)
+    .. deprecated:: 5.0
+       Tornado ``Futures`` have been merged with `asyncio.Future`,
+       so this method is now equivalent to `tornado.gen.convert_yielded`.
+    """
+    return convert_yielded(tornado_future)

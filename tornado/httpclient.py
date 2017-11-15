@@ -25,7 +25,7 @@ to switch to ``curl_httpclient`` for reasons such as the following:
 Note that if you are using ``curl_httpclient``, it is highly
 recommended that you use a recent version of ``libcurl`` and
 ``pycurl``.  Currently the minimum supported version of libcurl is
-7.21.1, and the minimum version of pycurl is 7.18.2.  It is highly
+7.22.0, and the minimum version of pycurl is 7.18.2.  It is highly
 recommended that your ``libcurl`` installation is built with
 asynchronous DNS resolver (threaded or c-ares), otherwise you may
 encounter various problems with request timeouts (for more
@@ -38,15 +38,15 @@ To select ``curl_httpclient``, call `AsyncHTTPClient.configure` at startup::
     AsyncHTTPClient.configure("tornado.curl_httpclient.CurlAsyncHTTPClient")
 """
 
-from __future__ import absolute_import, division, print_function, with_statement
+from __future__ import absolute_import, division, print_function
 
 import functools
 import time
 import weakref
 
-from tornado.concurrent import TracebackFuture
+from tornado.concurrent import Future
 from tornado.escape import utf8, native_str
-from tornado import httputil, stack_context
+from tornado import gen, httputil, stack_context
 from tornado.ioloop import IOLoop
 from tornado.util import Configurable
 
@@ -61,7 +61,7 @@ class HTTPClient(object):
         http_client = httpclient.HTTPClient()
         try:
             response = http_client.fetch("http://www.google.com/")
-            print response.body
+            print(response.body)
         except httpclient.HTTPError as e:
             # HTTPError is raised for non-200 responses; the response
             # can be found in e.response.
@@ -75,7 +75,10 @@ class HTTPClient(object):
         self._io_loop = IOLoop(make_current=False)
         if async_client_class is None:
             async_client_class = AsyncHTTPClient
-        self._async_client = async_client_class(self._io_loop, **kwargs)
+        # Create the client while our IOLoop is "current", without
+        # clobbering the thread's real current IOLoop (if any).
+        self._async_client = self._io_loop.run_sync(
+            gen.coroutine(lambda: async_client_class(**kwargs)))
         self._closed = False
 
     def __del__(self):
@@ -108,24 +111,24 @@ class AsyncHTTPClient(Configurable):
 
     Example usage::
 
-        def handle_request(response):
+        def handle_response(response):
             if response.error:
-                print "Error:", response.error
+                print("Error: %s" % response.error)
             else:
-                print response.body
+                print(response.body)
 
         http_client = AsyncHTTPClient()
-        http_client.fetch("http://www.google.com/", handle_request)
+        http_client.fetch("http://www.google.com/", handle_response)
 
     The constructor for this class is magic in several respects: It
     actually creates an instance of an implementation-specific
     subclass, and instances are reused as a kind of pseudo-singleton
-    (one per `.IOLoop`).  The keyword argument ``force_instance=True``
-    can be used to suppress this singleton behavior.  Unless
-    ``force_instance=True`` is used, no arguments other than
-    ``io_loop`` should be passed to the `AsyncHTTPClient` constructor.
-    The implementation subclass as well as arguments to its
-    constructor can be set with the static method `configure()`
+    (one per `.IOLoop`). The keyword argument ``force_instance=True``
+    can be used to suppress this singleton behavior. Unless
+    ``force_instance=True`` is used, no arguments should be passed to
+    the `AsyncHTTPClient` constructor. The implementation subclass as
+    well as arguments to its constructor can be set with the static
+    method `configure()`
 
     All `AsyncHTTPClient` implementations support a ``defaults``
     keyword argument, which can be used to set default values for
@@ -137,8 +140,9 @@ class AsyncHTTPClient(Configurable):
         client = AsyncHTTPClient(force_instance=True,
             defaults=dict(user_agent="MyUserAgent"))
 
-    .. versionchanged:: 4.1
-       The ``io_loop`` argument is deprecated.
+    .. versionchanged:: 5.0
+       The ``io_loop`` argument (deprecated since version 4.1) has been removed.
+
     """
     @classmethod
     def configurable_base(cls):
@@ -156,16 +160,15 @@ class AsyncHTTPClient(Configurable):
             setattr(cls, attr_name, weakref.WeakKeyDictionary())
         return getattr(cls, attr_name)
 
-    def __new__(cls, io_loop=None, force_instance=False, **kwargs):
-        io_loop = io_loop or IOLoop.current()
+    def __new__(cls, force_instance=False, **kwargs):
+        io_loop = IOLoop.current()
         if force_instance:
             instance_cache = None
         else:
             instance_cache = cls._async_clients()
         if instance_cache is not None and io_loop in instance_cache:
             return instance_cache[io_loop]
-        instance = super(AsyncHTTPClient, cls).__new__(cls, io_loop=io_loop,
-                                                       **kwargs)
+        instance = super(AsyncHTTPClient, cls).__new__(cls, **kwargs)
         # Make sure the instance knows which cache to remove itself from.
         # It can't simply call _async_clients() because we may be in
         # __new__(AsyncHTTPClient) but instance.__class__ may be
@@ -175,8 +178,8 @@ class AsyncHTTPClient(Configurable):
             instance_cache[instance.io_loop] = instance
         return instance
 
-    def initialize(self, io_loop, defaults=None):
-        self.io_loop = io_loop
+    def initialize(self, defaults=None):
+        self.io_loop = IOLoop.current()
         self.defaults = dict(HTTPRequest._DEFAULTS)
         if defaults is not None:
             self.defaults.update(defaults)
@@ -235,7 +238,7 @@ class AsyncHTTPClient(Configurable):
         # where normal dicts get converted to HTTPHeaders objects.
         request.headers = httputil.HTTPHeaders(request.headers)
         request = _RequestProxy(request, self.defaults)
-        future = TracebackFuture()
+        future = Future()
         if callback is not None:
             callback = stack_context.wrap(callback)
 
@@ -310,10 +313,10 @@ class HTTPRequest(object):
                  network_interface=None, streaming_callback=None,
                  header_callback=None, prepare_curl_callback=None,
                  proxy_host=None, proxy_port=None, proxy_username=None,
-                 proxy_password=None, allow_nonstandard_methods=None,
-                 validate_cert=None, ca_certs=None,
-                 allow_ipv6=None,
-                 client_key=None, client_cert=None, body_producer=None,
+                 proxy_password=None, proxy_auth_mode=None,
+                 allow_nonstandard_methods=None, validate_cert=None,
+                 ca_certs=None, allow_ipv6=None, client_key=None,
+                 client_cert=None, body_producer=None,
                  expect_100_continue=False, decompress_response=None,
                  ssl_options=None):
         r"""All parameters except ``url`` are optional.
@@ -341,13 +344,15 @@ class HTTPRequest(object):
            Allowed values are implementation-defined; ``curl_httpclient``
            supports "basic" and "digest"; ``simple_httpclient`` only supports
            "basic"
-        :arg float connect_timeout: Timeout for initial connection in seconds
-        :arg float request_timeout: Timeout for entire request in seconds
+        :arg float connect_timeout: Timeout for initial connection in seconds,
+           default 20 seconds
+        :arg float request_timeout: Timeout for entire request in seconds,
+           default 20 seconds
         :arg if_modified_since: Timestamp for ``If-Modified-Since`` header
         :type if_modified_since: `datetime` or `float`
         :arg bool follow_redirects: Should redirects be followed automatically
-           or return the 3xx response?
-        :arg int max_redirects: Limit for ``follow_redirects``
+           or return the 3xx response? Default True.
+        :arg int max_redirects: Limit for ``follow_redirects``, default 5.
         :arg string user_agent: String to send as ``User-Agent`` header
         :arg bool decompress_response: Request a compressed response from
            the server and decompress it after downloading.  Default is True.
@@ -372,16 +377,18 @@ class HTTPRequest(object):
            a ``pycurl.Curl`` object to allow the application to make additional
            ``setopt`` calls.
         :arg string proxy_host: HTTP proxy hostname.  To use proxies,
-           ``proxy_host`` and ``proxy_port`` must be set; ``proxy_username`` and
-           ``proxy_pass`` are optional.  Proxies are currently only supported
-           with ``curl_httpclient``.
+           ``proxy_host`` and ``proxy_port`` must be set; ``proxy_username``,
+           ``proxy_pass`` and ``proxy_auth_mode`` are optional.  Proxies are
+           currently only supported with ``curl_httpclient``.
         :arg int proxy_port: HTTP proxy port
         :arg string proxy_username: HTTP proxy username
         :arg string proxy_password: HTTP proxy password
+        :arg string proxy_auth_mode: HTTP proxy Authentication mode;
+           default is "basic". supports "basic" and "digest"
         :arg bool allow_nonstandard_methods: Allow unknown values for ``method``
-           argument?
+           argument? Default is False.
         :arg bool validate_cert: For HTTPS requests, validate the server's
-           certificate?
+           certificate? Default is True.
         :arg string ca_certs: filename of CA certificates in PEM format,
            or None to use defaults.  See note below when used with
            ``curl_httpclient``.
@@ -419,6 +426,9 @@ class HTTPRequest(object):
 
         .. versionadded:: 4.2
            The ``ssl_options`` argument.
+
+        .. versionadded:: 4.5
+           The ``proxy_auth_mode`` argument.
         """
         # Note that some of these attributes go through property setters
         # defined below.
@@ -430,6 +440,7 @@ class HTTPRequest(object):
         self.proxy_port = proxy_port
         self.proxy_username = proxy_username
         self.proxy_password = proxy_password
+        self.proxy_auth_mode = proxy_auth_mode
         self.url = url
         self.method = method
         self.body = body
@@ -530,7 +541,7 @@ class HTTPResponse(object):
 
     * buffer: ``cStringIO`` object for response body
 
-    * body: response body as string (created on demand from ``self.buffer``)
+    * body: response body as bytes (created on demand from ``self.buffer``)
 
     * error: Exception object, if any
 
@@ -572,15 +583,14 @@ class HTTPResponse(object):
         self.request_time = request_time
         self.time_info = time_info or {}
 
-    def _get_body(self):
+    @property
+    def body(self):
         if self.buffer is None:
             return None
         elif self._body is None:
             self._body = self.buffer.getvalue()
 
         return self._body
-
-    body = property(_get_body)
 
     def rethrow(self):
         """If there was an error on the request, raise an `HTTPError`."""
@@ -665,6 +675,7 @@ def main():
         if options.print_body:
             print(native_str(response.body))
     client.close()
+
 
 if __name__ == "__main__":
     main()
