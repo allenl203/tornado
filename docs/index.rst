@@ -21,7 +21,7 @@ Quick links
 -----------
 
 * Current version: |version| (`download from PyPI <https://pypi.python.org/pypi/tornado>`_, :doc:`release notes <releases>`)
-* `Source (github) <https://github.com/tornadoweb/tornado>`_
+* `Source (GitHub) <https://github.com/tornadoweb/tornado>`_
 * Mailing lists: `discussion <http://groups.google.com/group/python-tornado>`_ and `announcements <http://groups.google.com/group/python-tornado-announce>`_
 * `Stack Overflow <http://stackoverflow.com/questions/tagged/tornado>`_
 * `Wiki <https://github.com/tornadoweb/tornado/wiki/Links>`_
@@ -52,6 +52,36 @@ This example does not use any of Tornado's asynchronous features; for
 that see this `simple chat room
 <https://github.com/tornadoweb/tornado/tree/stable/demos/chat>`_.
 
+Threads and WSGI
+----------------
+
+Tornado is different from most Python web frameworks. It is not based
+on `WSGI <https://wsgi.readthedocs.io/en/latest/>`_, and it is
+typically run with only one thread per process. See the :doc:`guide`
+for more on Tornado's approach to asynchronous programming.
+
+While some support of WSGI is available in the `tornado.wsgi` module,
+it is not a focus of development and most applications should be
+written to use Tornado's own interfaces (such as `tornado.web`)
+directly instead of using WSGI.
+
+In general, Tornado code is not thread-safe. The only method in
+Tornado that is safe to call from other threads is
+`.IOLoop.add_callback`. You can also use `.IOLoop.run_in_executor` to
+asynchronously run a blocking function on another thread, but note
+that the function passed to ``run_in_executor`` should avoid
+referencing any Tornado objects. ``run_in_executor`` is the
+recommended way to interact with blocking code.
+
+``asyncio`` Integration
+-----------------------
+
+Tornado is integrated with the standard library `asyncio` module and
+shares the same event loop (by default since Tornado 5.0). In general,
+libraries designed for use with `asyncio` can be mixed freely with
+Tornado.
+
+
 Installation
 ------------
 
@@ -66,17 +96,11 @@ installed in this way, so you may wish to download a copy of the
 source tarball or clone the `git repository
 <https://github.com/tornadoweb/tornado>`_ as well.
 
-**Prerequisites**: Tornado runs on Python 2.7, and 3.4+.
-The updates to the `ssl` module in Python 2.7.9 are required
-(in some distributions, these updates may be available in
-older python versions). In addition to the requirements
-which will be installed automatically by ``pip`` or ``setup.py install``,
-the following optional packages may be useful:
+**Prerequisites**: Tornado 6.0 requires Python 3.5.2 or newer (See
+`Tornado 5.1 <https://www.tornadoweb.org/en/branch5.1/>`_ if
+compatibility with Python 2.7 is required). The following optional
+packages may be useful:
 
-* `concurrent.futures <https://pypi.python.org/pypi/futures>`_ is the
-  recommended thread pool for use with Tornado and enables the use of
-  `~tornado.netutil.ThreadedResolver`.  It is needed only on Python 2;
-  Python 3 includes this package in the standard library.
 * `pycurl <http://pycurl.sourceforge.net>`_ is used by the optional
   ``tornado.curl_httpclient``.  Libcurl version 7.22 or higher is required.
 * `Twisted <http://www.twistedmatrix.com>`_ may be used with the classes in
@@ -84,21 +108,24 @@ the following optional packages may be useful:
 * `pycares <https://pypi.python.org/pypi/pycares>`_ is an alternative
   non-blocking DNS resolver that can be used when threads are not
   appropriate.
-* `monotonic <https://pypi.python.org/pypi/monotonic>`_ or `Monotime
-  <https://pypi.python.org/pypi/Monotime>`_ add support for a
-  monotonic clock, which improves reliability in environments where
-  clock adjustments are frequent. No longer needed in Python 3.
 
-**Platforms**: Tornado should run on any Unix-like platform, although
-for the best performance and scalability only Linux (with ``epoll``)
-and BSD (with ``kqueue``) are recommended for production deployment
-(even though Mac OS X is derived from BSD and supports kqueue, its
-networking performance is generally poor so it is recommended only for
-development use).  Tornado will also run on Windows, although this
-configuration is not officially supported and is recommended only for
-development use. Without reworking Tornado IOLoop interface, it's not
-possible to add a native Tornado Windows IOLoop implementation or
-leverage Windows' IOCP support from frameworks like AsyncIO or Twisted.
+**Platforms**: Tornado is designed for Unix-like platforms, with best
+performance and scalability on systems supporting ``epoll`` (Linux),
+``kqueue`` (BSD/macOS), or ``/dev/poll`` (Solaris).
+
+Tornado will also run on Windows, although this configuration is not
+officially supported or recommended for production use. Some features
+are missing on Windows (including multi-process mode) and scalability
+is limited (Even though Tornado is built on ``asyncio``, which
+supports Windows, Tornado does not use the APIs that are necessary for
+scalable networking on Windows).
+
+On Windows, Tornado requires the ``WindowsSelectorEventLoop``. This is
+the default in Python 3.7 and older, but Python 3.8 defaults to an
+event loop that is not compatible with Tornado. Applications that use
+Tornado on Windows with Python 3.8 must call
+``asyncio.set_event_loop_policy(asyncio.WindowsSelectorEventLoopPolicy())``
+at the beginning of their ``main`` file/function.
 
 Documentation
 -------------

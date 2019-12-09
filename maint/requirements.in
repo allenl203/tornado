@@ -1,8 +1,4 @@
 # Requirements for tools used in the development of tornado.
-# This list is for python 3.5; for 2.7 add:
-# - futures
-# - mock
-#
 # Use virtualenv instead of venv; tox seems to get confused otherwise.
 #
 # maint/requirements.txt contains the pinned versions of all direct and
@@ -15,12 +11,14 @@ pycares
 pycurl
 
 # Other useful tools
-Sphinx
-autopep8
+Sphinx>1.8.2
+black
 coverage
 flake8
+mypy==0.630
 pep8
 pyflakes
+sphinxcontrib-asyncio
 sphinx-rtd-theme
 tox
 twine

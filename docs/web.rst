@@ -9,7 +9,7 @@
 
    Request handlers
    ----------------
-   .. autoclass:: RequestHandler
+   .. autoclass:: RequestHandler(...)
 
    Entry points
    ^^^^^^^^^^^^
@@ -21,14 +21,14 @@
    .. _verbs:
 
    Implement any of the following methods (collectively known as the
-   HTTP verb methods) to handle the corresponding HTTP method.
-   These methods can be made asynchronous with one of the following
-   decorators: `.gen.coroutine`, `.return_future`, or `asynchronous`.
+   HTTP verb methods) to handle the corresponding HTTP method. These
+   methods can be made asynchronous with the ``async def`` keyword or
+   `.gen.coroutine` decorator.
 
    The arguments to these methods come from the `.URLSpec`: Any
    capturing groups in the regular expression become arguments to the
    HTTP verb methods (keyword arguments if the group is named,
-   positional arguments if its unnamed).
+   positional arguments if it's unnamed).
 
    To support a method not on this list, override the class variable
    ``SUPPORTED_METHODS``::
@@ -50,11 +50,24 @@
    Input
    ^^^^^
 
-   .. automethod:: RequestHandler.get_argument
+   The ``argument`` methods provide support for HTML form-style
+   arguments. These methods are available in both singular and plural
+   forms because HTML forms are ambiguous and do not distinguish
+   between a singular argument and a list containing one entry. If you
+   wish to use other formats for arguments (for example, JSON), parse
+   ``self.request.body`` yourself::
+
+       def prepare(self):
+           if self.request.headers['Content-Type'] == 'application/x-json':
+               self.args = json_decode(self.request.body)
+           # Access self.args directly instead of using self.get_argument.
+
+
+   .. automethod:: RequestHandler.get_argument(name: str, default: Union[None, str, RAISE] = RAISE, strip: bool = True) -> Optional[str]
    .. automethod:: RequestHandler.get_arguments
-   .. automethod:: RequestHandler.get_query_argument
+   .. automethod:: RequestHandler.get_query_argument(name: str, default: Union[None, str, RAISE] = RAISE, strip: bool = True) -> Optional[str]
    .. automethod:: RequestHandler.get_query_arguments
-   .. automethod:: RequestHandler.get_body_argument
+   .. automethod:: RequestHandler.get_body_argument(name: str, default: Union[None, str, RAISE] = RAISE, strip: bool = True) -> Optional[str]
    .. automethod:: RequestHandler.get_body_arguments
    .. automethod:: RequestHandler.decode_argument
    .. attribute:: RequestHandler.request
@@ -125,6 +138,7 @@
    .. automethod:: RequestHandler.compute_etag
    .. automethod:: RequestHandler.create_template_loader
    .. autoattribute:: RequestHandler.current_user
+   .. automethod:: RequestHandler.detach
    .. automethod:: RequestHandler.get_browser_locale
    .. automethod:: RequestHandler.get_current_user
    .. automethod:: RequestHandler.get_login_url
@@ -145,9 +159,9 @@
 
 
    Application configuration
-   -----------------------------
-   .. autoclass:: Application
-      :members:
+   -------------------------
+
+   .. autoclass:: Application(handlers: Optional[List[Union[Rule, Tuple]]] = None, default_host: Optional[str] = None, transforms: Optional[List[Type[OutputTransform]]] = None, **settings)
 
       .. attribute:: settings
 
@@ -184,7 +198,7 @@
            `RequestHandler` object).  The default implementation
            writes to the `logging` module's root logger.  May also be
            customized by overriding `Application.log_request`.
-         * ``serve_traceback``: If true, the default error page
+         * ``serve_traceback``: If ``True``, the default error page
            will include the traceback of the error.  This option is new in
            Tornado 3.2; previously this functionality was controlled by
            the ``debug`` setting.
@@ -211,7 +225,7 @@
          * ``login_url``: The `authenticated` decorator will redirect
            to this url if the user is not logged in.  Can be further
            customized by overriding `RequestHandler.get_login_url`
-         * ``xsrf_cookies``: If true, :ref:`xsrf` will be enabled.
+         * ``xsrf_cookies``: If ``True``, :ref:`xsrf` will be enabled.
          * ``xsrf_cookie_version``: Controls the version of new XSRF
            cookies produced by this server.  Should generally be left
            at the default (which will always be the highest supported
@@ -265,13 +279,18 @@
            should be a dictionary of keyword arguments to be passed to the
            handler's ``initialize`` method.
 
+   .. automethod:: Application.listen
+   .. automethod:: Application.add_handlers(handlers: List[Union[Rule, Tuple]])
+   .. automethod:: Application.get_handler_delegate
+   .. automethod:: Application.reverse_url
+   .. automethod:: Application.log_request
+
    .. autoclass:: URLSpec
 
       The ``URLSpec`` class is also available under the name ``tornado.web.url``.
 
    Decorators
    ----------
-   .. autofunction:: asynchronous
    .. autofunction:: authenticated
    .. autofunction:: addslash
    .. autofunction:: removeslash
