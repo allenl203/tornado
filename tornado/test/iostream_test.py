@@ -23,8 +23,10 @@ from tornado.testing import (
 )
 from tornado.test.util import skipIfNonUnix, refusing_port, skipPypy3V58
 from tornado.web import RequestHandler, Application
+import asyncio
 import errno
 import hashlib
+import logging
 import os
 import platform
 import random
@@ -165,6 +167,27 @@ class TestReadWriteMixin(object):
     def make_iostream_pair(self, **kwargs):
         raise NotImplementedError
 
+    def iostream_pair(self, **kwargs):
+        """Like make_iostream_pair, but called by ``async with``.
+
+        In py37 this becomes simpler with contextlib.asynccontextmanager.
+        """
+
+        class IOStreamPairContext:
+            def __init__(self, test, kwargs):
+                self.test = test
+                self.kwargs = kwargs
+
+            async def __aenter__(self):
+                self.pair = await self.test.make_iostream_pair(**self.kwargs)
+                return self.pair
+
+            async def __aexit__(self, typ, value, tb):
+                for s in self.pair:
+                    s.close()
+
+        return IOStreamPairContext(self, kwargs)
+
     @gen_test
     def test_write_zero_bytes(self):
         # Attempting to write zero bytes should run the callback without
@@ -259,6 +282,40 @@ class TestReadWriteMixin(object):
         finally:
             ws.close()
             rs.close()
+
+    @gen_test
+    async def test_read_until_with_close_after_second_packet(self):
+        # This is a regression test for a regression in Tornado 6.0
+        # (maybe 6.0.3?) reported in
+        # https://github.com/tornadoweb/tornado/issues/2717
+        #
+        # The data arrives in two chunks; the stream is closed at the
+        # same time that the second chunk is received. If the second
+        # chunk is larger than the first, it works, but when this bug
+        # existed it would fail if the second chunk were smaller than
+        # the first. This is due to the optimization that the
+        # read_until condition is only checked when the buffer doubles
+        # in size
+        async with self.iostream_pair() as (rs, ws):
+            rf = asyncio.ensure_future(rs.read_until(b"done"))
+            await ws.write(b"x" * 2048)
+            ws.write(b"done")
+            ws.close()
+            await rf
+
+    @gen_test
+    async def test_read_until_unsatisfied_after_close(self: typing.Any):
+        # If a stream is closed while reading, it raises
+        # StreamClosedError instead of UnsatisfiableReadError (the
+        # latter should only be raised when byte limits are reached).
+        # The particular scenario tested here comes from #2717.
+        async with self.iostream_pair() as (rs, ws):
+            rf = asyncio.ensure_future(rs.read_until(b"done"))
+            await ws.write(b"x" * 2048)
+            ws.write(b"foo")
+            ws.close()
+            with self.assertRaises(StreamClosedError):
+                await rf
 
     @gen_test
     def test_close_callback_with_pending_read(self: typing.Any):
@@ -366,7 +423,7 @@ class TestReadWriteMixin(object):
 
             # Not enough space, but we don't know it until all we can do is
             # log a warning and close the connection.
-            with ExpectLog(gen_log, "Unsatisfiable read"):
+            with ExpectLog(gen_log, "Unsatisfiable read", level=logging.INFO):
                 fut = rs.read_until(b"def", max_bytes=5)
                 ws.write(b"123456")
                 yield closed.wait()
@@ -385,7 +442,7 @@ class TestReadWriteMixin(object):
             # inline.  For consistency with the out-of-line case, we
             # do not raise the error synchronously.
             ws.write(b"123456")
-            with ExpectLog(gen_log, "Unsatisfiable read"):
+            with ExpectLog(gen_log, "Unsatisfiable read", level=logging.INFO):
                 with self.assertRaises(StreamClosedError):
                     yield rs.read_until(b"def", max_bytes=5)
             yield closed.wait()
@@ -403,7 +460,7 @@ class TestReadWriteMixin(object):
             # puts us over the limit, we fail the request because it was not
             # found within the limit.
             ws.write(b"abcdef")
-            with ExpectLog(gen_log, "Unsatisfiable read"):
+            with ExpectLog(gen_log, "Unsatisfiable read", level=logging.INFO):
                 rs.read_until(b"def", max_bytes=5)
                 yield closed.wait()
         finally:
@@ -430,7 +487,7 @@ class TestReadWriteMixin(object):
 
             # Not enough space, but we don't know it until all we can do is
             # log a warning and close the connection.
-            with ExpectLog(gen_log, "Unsatisfiable read"):
+            with ExpectLog(gen_log, "Unsatisfiable read", level=logging.INFO):
                 rs.read_until_regex(b"def", max_bytes=5)
                 ws.write(b"123456")
                 yield closed.wait()
@@ -449,7 +506,7 @@ class TestReadWriteMixin(object):
             # inline.  For consistency with the out-of-line case, we
             # do not raise the error synchronously.
             ws.write(b"123456")
-            with ExpectLog(gen_log, "Unsatisfiable read"):
+            with ExpectLog(gen_log, "Unsatisfiable read", level=logging.INFO):
                 rs.read_until_regex(b"def", max_bytes=5)
                 yield closed.wait()
         finally:
@@ -466,7 +523,7 @@ class TestReadWriteMixin(object):
             # puts us over the limit, we fail the request because it was not
             # found within the limit.
             ws.write(b"abcdef")
-            with ExpectLog(gen_log, "Unsatisfiable read"):
+            with ExpectLog(gen_log, "Unsatisfiable read", level=logging.INFO):
                 rs.read_until_regex(b"def", max_bytes=5)
                 yield closed.wait()
         finally:
